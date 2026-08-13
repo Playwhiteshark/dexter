@@ -1,0 +1,75 @@
+# ============================================================
+# Python environments / generated Python files
+# ============================================================
+**/.venv/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ============================================================
+# Machine-local configuration / secrets
+# ============================================================
+.env
+.env.*
+!.env.example
+**/local_config.py
+
+# ============================================================
+# Dexter tool generated test / benchmark output
+# ============================================================
+**/_dexter_tool_tests/
+**/benchmark_runs/
+
+# ============================================================
+# Existing Goose generated runs
+# Keep harness source code/configs; ignore run artifacts.
+# ============================================================
+Harnesses/Goose/assistant-bench-runs/
+Harnesses/Goose/diagnostic-runs/
+
+# ============================================================
+# Model Gateway runtime traces
+# Keep gateway/config/source code.
+# ============================================================
+Runtime/Model Gateway/ollama_advisor_debug.jsonl
+Runtime/Model Gateway/ollama_advisor_trace.jsonl
+Runtime/Model Gateway/ollama_proxy_trace.jsonl
+
+# Historical/manual backups; Git will provide history going forward.
+Runtime/Model Gateway/Archive/
+
+# Machine-specific exported Scheduled Task snapshots.
+Runtime/Model Gateway/Scheduled Task/
+
+# ============================================================
+# Generated diagnostic reports
+# Keep the scripts that generate them.
+# ============================================================
+Diagnostics/jarvis-config-audit_*.md
+
+# ============================================================
+# Local duplicate/package copies of Dexter Tools
+# Track Runtime/Tools/dexter-tools/ itself.
+# ============================================================
+Runtime/Tools/dexter-tools.zip
+Runtime/Tools/dexter-tools-v0.1/
+
+# ============================================================
+# Large model weights if added later
+# Keep Modelfiles and model configuration.
+# ============================================================
+*.gguf
+*.safetensors
+*.ckpt
+*.pth
+*.pt
+
+# ============================================================
+# Editors / operating system
+# ============================================================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

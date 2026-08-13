@@ -1,0 +1,19 @@
+{
+  "advisor_mode": "off",
+  "advisor_model": "gemma4:12b",
+  "advisor_temperature": 0.2,
+  "advisor_num_ctx": 8192,
+  "advisor_keep_alive": "30m",
+  "advisor_timeout_seconds": 600,
+  "planner_num_predict": 320,
+  "checkpoint_num_predict": 320,
+  "checker_num_predict": 768,
+  "checkpoint_every_tool_results": 4,
+  "max_final_review_rounds": 3,
+  "advisor_error_policy": "pass",
+  "advisor_trajectory_max_chars": 28000,
+  "trace_enabled": true,
+  "trace_advisor_packets": false,
+  "qwen35_mode": "thinking_coding",
+  "gemma4_mode": "thinking"
+}
