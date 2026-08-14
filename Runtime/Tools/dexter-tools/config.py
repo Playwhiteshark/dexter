@@ -1,53 +1,47 @@
+from __future__ import annotations
+
 from pathlib import Path
 
-# Filesystem access is deny-by-default: every file/directory tool resolves the
-# requested path and requires it to remain under one of these roots.
-ALLOWED_ROOTS = [
-    Path(r"C:\Users\ahmad\COMPUTER STUFF\Self-hosted AI\Jarvis Sandbox").resolve()
-]
+try:
+    import local_config as _local
+except ModuleNotFoundError:
+    _local = None
 
-# open_app never accepts an arbitrary command line. The model can launch only
-# aliases explicitly registered here. Add more apps as Dexter learns them.
-APP_ALIASES = {
-    "notepad": {
-        "command": [r"C:\Windows\System32\notepad.exe"],
-        "allow_arguments": False,
-    },
-    "file explorer": {
-        "command": [r"C:\Windows\explorer.exe"],
-        "allow_arguments": False,
-    },
-    "explorer": {
-        "command": [r"C:\Windows\explorer.exe"],
-        "allow_arguments": False,
-    },
-}
+# Machine policy is intentionally local and deny-by-default. A partial local
+# config is tolerated so adding roots does not accidentally require app aliases
+# (or vice versa).
+_LOCAL_ALLOWED_ROOTS = getattr(_local, "ALLOWED_ROOTS", []) if _local else []
+_LOCAL_APP_ALIASES = getattr(_local, "APP_ALIASES", {}) if _local else {}
 
-# open_file uses the Windows file association, so executable/script/shortcut
-# types are blocked. Otherwise a file tool could accidentally become a generic
-# code-execution tool and bypass open_app's allowlist.
+ALLOWED_ROOTS = [Path(path).expanduser().resolve(strict=False) for path in _LOCAL_ALLOWED_ROOTS]
+APP_ALIASES = dict(_LOCAL_APP_ALIASES)
+
+# Normal model-facing defaults. Callers may explicitly request more up to the
+# safety ceilings below.
+DEFAULT_LIST_ENTRIES = 50
+DEFAULT_SEARCH_RESULTS = 25
+DEFAULT_CONTENT_MATCHES = 20
+DEFAULT_CONTENT_MATCHES_PER_FILE = 3
+DEFAULT_READ_LINES = 160
+DEFAULT_READ_CHARS = 12_000
+DEFAULT_CLIPBOARD_CHARS = 10_000
+DEFAULT_PROCESS_RESULTS = 30
+DEFAULT_WINDOW_RESULTS = 30
+
+# open_file uses Windows file associations, so executable/script/shortcut types
+# are blocked to avoid bypassing open_app's explicit allowlist.
 DANGEROUS_OPEN_FILE_EXTENSIONS = {
     ".bat", ".cmd", ".com", ".cpl", ".exe", ".hta", ".jar", ".js", ".jse",
     ".lnk", ".msi", ".msp", ".ps1", ".py", ".pyw", ".reg", ".scr", ".url",
     ".vbe", ".vbs", ".wsf", ".wsh",
 }
 
-# Search defaults deliberately skip noisy dependency/VCS trees. The caller can
-# opt into hidden directories when it really needs them.
 DEFAULT_EXCLUDED_DIR_NAMES = {
-    ".git",
-    ".hg",
-    ".svn",
-    ".idea",
-    ".vs",
-    ".vscode",
-    ".venv",
-    "venv",
-    "env",
-    "node_modules",
-    "__pycache__",
+    ".git", ".hg", ".svn", ".idea", ".vs", ".vscode", ".venv",
+    "venv", "env", "node_modules", "__pycache__",
 }
 
+# Process/safety ceilings, not normal response targets.
 MAX_LIST_ENTRIES = 500
 MAX_SEARCH_RESULTS = 200
 MAX_CONTENT_MATCHES = 200
@@ -57,9 +51,6 @@ MAX_READ_CHARS = 100_000
 MAX_CLIPBOARD_CHARS = 100_000
 MAX_TYPE_TEXT_CHARS = 20_000
 
-# Destructive deletion is deliberately disabled. delete_file sends files to the
-# Recycle Bin by default. Flip this only if a later Dexter policy explicitly
-# supports permanent deletion.
 ALLOW_PERMANENT_DELETE = False
 
 MAX_BACKGROUND_JOBS = 16

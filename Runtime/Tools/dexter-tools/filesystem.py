@@ -27,6 +27,10 @@ def _resolved_roots() -> list[Path]:
     return [Path(root).resolve(strict=False) for root in ALLOWED_ROOTS]
 
 
+def _is_within_allowed_roots(path: Path) -> bool:
+    return any(path == root or path.is_relative_to(root) for root in _resolved_roots())
+
+
 def resolve_allowed_path(path: str) -> Path:
     """Resolve a path and enforce Dexter's configured filesystem boundary."""
     if not isinstance(path, str) or not path.strip():
@@ -34,7 +38,7 @@ def resolve_allowed_path(path: str) -> Path:
 
     resolved = Path(path).expanduser().resolve(strict=False)
 
-    if not any(resolved == root or resolved.is_relative_to(root) for root in _resolved_roots()):
+    if not _is_within_allowed_roots(resolved):
         raise ValueError(
             f"Path is outside Dexter's allowed filesystem roots: {resolved}"
         )
@@ -112,12 +116,21 @@ def _should_skip_dir(name: str, include_hidden: bool) -> bool:
 
 
 def _walk(root: Path, include_hidden: bool) -> Iterable[tuple[Path, list[str], list[str]]]:
+    """Walk without descending through links/junctions that escape allowed roots."""
     for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
-        dirs[:] = [
-            name for name in dirs
-            if not _should_skip_dir(name, include_hidden)
-        ]
-        yield Path(current), dirs, files
+        current_path = Path(current)
+        safe_dirs: list[str] = []
+        for name in dirs:
+            if _should_skip_dir(name, include_hidden):
+                continue
+            try:
+                resolved = (current_path / name).resolve(strict=False)
+            except OSError:
+                continue
+            if _is_within_allowed_roots(resolved):
+                safe_dirs.append(name)
+        dirs[:] = safe_dirs
+        yield current_path, dirs, files
 
 
 def get_file_sha256(path: str) -> dict:
@@ -281,26 +294,26 @@ def search_paths(
         for name in names:
             scanned += 1
             candidate = current / name
+            try:
+                resolved = candidate.resolve(strict=False)
+            except OSError:
+                continue
+            if not _is_within_allowed_roots(resolved):
+                continue
 
-            if candidate.is_file() and allowed_extensions is not None:
-                if candidate.suffix.lower() not in allowed_extensions:
+            is_file = resolved.is_file()
+            if is_file and allowed_extensions is not None:
+                if resolved.suffix.lower() not in allowed_extensions:
                     continue
 
             if not _name_matches(name, pattern):
-                continue
-
-            resolved = candidate.resolve(strict=False)
-            if not any(
-                resolved == root_path or resolved.is_relative_to(root_path)
-                for root_path in _resolved_roots()
-            ):
                 continue
 
             matches.append(
                 {
                     "path": str(resolved),
                     "name": candidate.name,
-                    "type": "directory" if candidate.is_dir() else "file",
+                    "type": "file" if is_file else "directory" if resolved.is_dir() else "other",
                 }
             )
 
@@ -323,6 +336,7 @@ def search_paths(
     }
 
 
+
 def _looks_binary(data: bytes) -> bool:
     if not data:
         return False
@@ -331,30 +345,23 @@ def _looks_binary(data: bytes) -> bool:
     if b"\x00" in sample:
         return True
 
-    # Treat a high density of non-text control bytes as binary. This avoids
-    # Windows-1252's permissive decoder turning arbitrary binary blobs into
-    # apparently searchable text.
-    allowed_controls = {9, 10, 13}  # tab, LF, CR
-    control_count = sum(
-        1 for value in sample
-        if value < 32 and value not in allowed_controls
-    )
-    return control_count / len(sample) > 0.20
+    # Treat a high proportion of non-whitespace control bytes as binary while
+    # allowing ordinary tabs/newlines/carriage returns.
+    controls = sum(byte < 32 and byte not in {9, 10, 13} for byte in sample)
+    return controls / len(sample) > 0.20
 
 
 def _decode_text(data: bytes) -> tuple[str, str]:
-    encodings = ("utf-8-sig", "utf-8", "cp1252")
-    last_error: UnicodeDecodeError | None = None
-
-    for encoding in encodings:
+    # UTF-8 is by far the common case. utf-8-sig consumes a BOM when present.
+    for encoding in ("utf-8-sig", "utf-8", "utf-16"):
         try:
             return data.decode(encoding), encoding
-        except UnicodeDecodeError as exc:
-            last_error = exc
+        except UnicodeDecodeError:
+            continue
 
-    raise ValueError(
-        "File could not be decoded as UTF-8 or Windows-1252 text."
-    ) from last_error
+    # Windows text files are sometimes legacy ANSI/cp1252. This decode never
+    # fails, and _looks_binary has already rejected obvious binary data.
+    return data.decode("cp1252"), "cp1252"
 
 
 def read_text_file(
@@ -411,7 +418,6 @@ def read_text_file(
             or start_line - 1 > len(lines)
         ),
     }
-
 
 def search_text_contents(
     root: str,
