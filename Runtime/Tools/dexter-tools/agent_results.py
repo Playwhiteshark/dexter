@@ -78,7 +78,7 @@ def windows(result: dict[str, Any]) -> dict[str, Any]:
 def job_snapshot(item: dict[str, Any]) -> dict[str, Any]:
     return fields(
         item,
-        "job_id", "kind", "state", "runs", "stop_reason", "error", "started_at", "finished_at",
+        "job_id", "kind", "state", "runs", "stop_reason", "error",
     )
 
 

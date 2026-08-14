@@ -352,16 +352,17 @@ def _looks_binary(data: bytes) -> bool:
 
 
 def _decode_text(data: bytes) -> tuple[str, str]:
-    # UTF-8 is by far the common case. utf-8-sig consumes a BOM when present.
-    for encoding in ("utf-8-sig", "utf-8", "utf-16"):
+    last_error: UnicodeDecodeError | None = None
+
+    for encoding in ("utf-8-sig", "utf-8", "cp1252"):
         try:
             return data.decode(encoding), encoding
-        except UnicodeDecodeError:
-            continue
+        except UnicodeDecodeError as exc:
+            last_error = exc
 
-    # Windows text files are sometimes legacy ANSI/cp1252. This decode never
-    # fails, and _looks_binary has already rejected obvious binary data.
-    return data.decode("cp1252"), "cp1252"
+    raise ValueError(
+        "File could not be decoded as UTF-8 or Windows-1252 text."
+    ) from last_error
 
 
 def read_text_file(

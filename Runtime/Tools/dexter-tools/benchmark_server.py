@@ -182,8 +182,9 @@ def _allow_fixture_root() -> None:
     if not value:
         return
     root = Path(value).expanduser().resolve(strict=False)
-    if root not in config.ALLOWED_ROOTS:
-        config.ALLOWED_ROOTS.append(root)
+    # Benchmark file tools must never inherit the user's normal allowed roots.
+    # Keep the benchmark process restricted to generated fixtures only.
+    config.ALLOWED_ROOTS[:] = [root]
 
 
 def install_safe_wrappers() -> None:

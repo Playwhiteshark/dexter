@@ -247,7 +247,7 @@ def open_folder(path: str) -> dict:
 def open_url(url: str) -> dict:
     """Open an http:// or https:// URL in the default browser."""
     result = open_http_url(url)
-    return {"opened": bool(result.get("dispatched", False))}
+    return {"opened": bool(result.get("browser_accepted_request", False))}
 
 
 # Clipboard / processes / windows -------------------------------------------

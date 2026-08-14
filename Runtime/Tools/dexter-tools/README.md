@@ -1,4 +1,4 @@
-# Dexter Tools v0.2 development candidate
+# Dexter Tools v0.2
 
 Deterministic local-computer tools for Dexter. The direct tool catalog remains in place; the Model Gateway is unchanged. The model chooses tools while deterministic modules enforce permissions, exact execution, verification, and postconditions.
 
@@ -29,7 +29,7 @@ From the `dexter-tools` directory:
 Copy-Item .\local_config.example.py .\local_config.py
 ```
 
-`local_config.py` is ignored by Git. Keep filesystem roots narrow and add only explicitly trusted app aliases.
+Then edit `local_config.py` for this machine. The committed example is deny-by-default and contains no user-specific paths. `local_config.py` is ignored by Git; keep filesystem roots narrow and add only explicitly trusted app aliases.
 
 ## Deterministic validation
 

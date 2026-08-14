@@ -1,20 +1,13 @@
-# Copy this file to local_config.py and keep the local copy out of Git.
+# Copy this file to local_config.py, then add only machine-local policy you trust.
+# The committed example is intentionally deny-by-default and contains no user-specific paths.
 ALLOWED_ROOTS = [
-    r"C:\Users\ahmad\COMPUTER STUFF\Self-hosted AI\Jarvis Sandbox",
+    # r"C:\path\to\trusted\root",
 ]
 
 # open_app accepts only aliases listed here and never an arbitrary command.
 APP_ALIASES = {
-    "notepad": {
-        "command": [r"C:\Windows\System32\notepad.exe"],
-        "allow_arguments": False,
-    },
-    "file explorer": {
-        "command": [r"C:\Windows\explorer.exe"],
-        "allow_arguments": False,
-    },
-    "explorer": {
-        "command": [r"C:\Windows\explorer.exe"],
-        "allow_arguments": False,
-    },
+    # "example app": {
+    #     "command": [r"C:\path\to\app.exe"],
+    #     "allow_arguments": False,
+    # },
 }

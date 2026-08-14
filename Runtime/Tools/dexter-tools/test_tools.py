@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import importlib
 import json
+import os
 import tempfile
 import time
 from pathlib import Path
@@ -106,18 +107,40 @@ def filesystem_suite() -> list[bool]:
         check(server.search_files.__defaults__[-1] == 25, "search_files default changed")
         check(server.read_file.__defaults__[1:] == (160, 12_000), "read_file defaults changed")
 
-    def verified_copy_move():
+    def verified_file_operations():
+        review = root / "Review"
+        created = server.create_directory(str(review))
+        check(created["created"] and review.is_dir(), "create_directory postcondition failed")
+
         source = root / "source.txt"
         source.write_text("verified", encoding="utf-8")
-        copied = root / "copied.txt"
+        copied = review / "copied.txt"
+        renamed = review / "renamed.txt"
         moved = root / "moved.txt"
+
         result = server.copy_file(str(source), str(copied))
         check(result == {"destination": str(copied.resolve())}, f"copy result too noisy: {result}")
         trace_mutation("copy_file", source=str(source), destination=str(copied))
-        result = server.move_file(str(copied), str(moved))
+
+        result = server.rename_file(str(copied), renamed.name)
+        check(result == {"destination": str(renamed.resolve())}, f"rename result too noisy: {result}")
+        check(renamed.is_file() and not copied.exists(), "rename postconditions failed")
+        trace_mutation("rename_file", source=str(copied), destination=str(renamed))
+
+        result = server.move_file(str(renamed), str(moved))
         check(result == {"destination": str(moved.resolve())}, f"move result too noisy: {result}")
-        trace_mutation("move_file", source=str(copied), destination=str(moved))
-        check(source.exists() and moved.exists() and not copied.exists(), "copy/move postconditions failed")
+        trace_mutation("move_file", source=str(renamed), destination=str(moved))
+        check(source.exists() and moved.exists() and not renamed.exists(), "copy/move postconditions failed")
+
+    def undecodable_text_errors_cleanly():
+        path = root / "undefined-cp1252.txt"
+        path.write_bytes(b"\x8f")
+        try:
+            server.read_file(str(path))
+        except ValueError as exc:
+            check("could not be decoded" in str(exc).lower(), "decode failure is not actionable")
+        else:
+            raise AssertionError("undefined cp1252 byte was accepted as text")
 
     def overwrite_refused():
         source = root / "a.txt"
@@ -134,7 +157,8 @@ def filesystem_suite() -> list[bool]:
     return [
         run_case("Filesystem: root boundary + read", boundary_and_reads),
         run_case("Filesystem: compact defaults", compact_defaults),
-        run_case("Filesystem: verified copy/move + compact results", verified_copy_move),
+        run_case("Filesystem: verified create/copy/rename/move + compact results", verified_file_operations),
+        run_case("Filesystem: undecodable text fails cleanly", undecodable_text_errors_cleanly),
         run_case("Filesystem: overwrite refusal", overwrite_refused),
     ]
 
@@ -228,6 +252,8 @@ def image_suite() -> list[bool]:
 def system_suite() -> list[bool]:
     root = reset_test_root()
     _configure_root(root)
+    import launcher
+    import process_tools
     import server
 
     def compact_clipboard_contract():
@@ -256,9 +282,72 @@ def system_suite() -> list[bool]:
         ):
             check(server.get_foreground_window() == {"window": None}, "no-foreground-window contract")
 
+    def launcher_policy_guards():
+        dangerous = root / "do-not-run.cmd"
+        dangerous.write_text("@echo off\necho should-not-run\n", encoding="utf-8")
+
+        try:
+            launcher.open_allowed_file(str(dangerous))
+        except PermissionError:
+            pass
+        else:
+            raise AssertionError("open_file allowed an executable/script type")
+
+        try:
+            launcher.launch_app("__dexter_unconfigured_test_app__")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("open_app accepted an unconfigured alias")
+
+        alias = "__dexter_no_args_test__"
+        previous_alias = launcher.APP_ALIASES.get(alias)
+        launcher.APP_ALIASES[alias] = {
+            "command": [r"C:\does-not-need-to-exist.exe"],
+            "allow_arguments": False,
+        }
+        try:
+            try:
+                launcher.launch_app(alias, arguments=["unexpected"])
+            except PermissionError:
+                pass
+            else:
+                raise AssertionError("open_app accepted arguments for a no-arguments alias")
+        finally:
+            if previous_alias is None:
+                launcher.APP_ALIASES.pop(alias, None)
+            else:
+                launcher.APP_ALIASES[alias] = previous_alias
+
+        try:
+            launcher.open_http_url("file:///C:/Windows/win.ini")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("open_url accepted a non-HTTP URL")
+
+    def process_wrapper():
+        result = process_tools.process_running(pid=os.getpid())
+        check(result["running"], "current test process was not found")
+
+    def open_url_result_contract():
+        with patch(
+            "server.open_http_url",
+            return_value={"dispatched": True, "browser_accepted_request": False},
+        ):
+            check(server.open_url("https://example.com") == {"opened": False}, "open_url overstated success")
+        with patch(
+            "server.open_http_url",
+            return_value={"dispatched": True, "browser_accepted_request": True},
+        ):
+            check(server.open_url("https://example.com") == {"opened": True}, "open_url lost successful result")
+
     return [
         run_case("System: compact clipboard result", compact_clipboard_contract),
         run_case("System: compact foreground-window result", foreground_contract),
+        run_case("System: launcher policy guards", launcher_policy_guards),
+        run_case("System: process wrapper", process_wrapper),
+        run_case("System: open_url success contract", open_url_result_contract),
     ]
 
 
@@ -266,6 +355,28 @@ def desktop_suite() -> list[bool]:
     root = reset_test_root()
     _configure_root(root)
     import jobs
+    import server
+
+    def screenshot_and_template_match():
+        screenshot_path = root / "screen.png"
+        capture = server.screenshot(str(screenshot_path))
+        check(capture["width"] > 0 and capture["height"] > 0, "screenshot dimensions are invalid")
+
+        with Image.open(screenshot_path) as image:
+            cx = max(0, image.width // 2 - 40)
+            cy = max(0, image.height // 2 - 40)
+            crop = image.crop((cx, cy, min(cx + 80, image.width), min(cy + 80, image.height)))
+            template_path = root / "template.png"
+            crop.save(template_path)
+
+        found = server.find_image(str(template_path), confidence=0.99)
+        check(found["found"], "template cropped from current screen was not found")
+
+    def screen_cursor_smoke():
+        size = server.computer_action("screen_size")
+        pos = server.computer_action("cursor_position")
+        check(size["width"] > 0 and size["height"] > 0, "invalid screen size")
+        check(isinstance(pos["x"], int) and isinstance(pos["y"], int), "invalid cursor position")
 
     def scheduler_mocked():
         clicks = {"count": 0}
@@ -286,7 +397,57 @@ def desktop_suite() -> list[bool]:
             final = jobs.get_job_status(job_id)["job"]
             check(final["runs"] == 2, f"expected 2 mocked clicks, got {final['runs']}")
 
-    return [run_case("Desktop: background click scheduler (mocked)", scheduler_mocked)]
+            started2 = jobs.start_click_interval_job(interval_seconds=0.10, position_mode="current")
+            job_id2 = started2["job"]["job_id"]
+            time.sleep(0.15)
+            cancelled = jobs.cancel_background_job(job_id2, wait_seconds=1.0)["job"]
+            check(cancelled["state"] == "cancelled", f"cancel ended as {cancelled['state']}")
+
+    def visual_stop_condition_mocked():
+        click_count = {"value": 0}
+
+        def fake_click_mouse(**kwargs):
+            click_count["value"] += 1
+            return {"status": "ok"}
+
+        def fake_find_image(**kwargs):
+            return {
+                "status": "ok",
+                "found": click_count["value"] >= 2,
+                "match": {"center_x": 10, "center_y": 10} if click_count["value"] >= 2 else None,
+            }
+
+        fake_template = root / "stop.png"
+        Image.new("RGB", (8, 8), "white").save(fake_template)
+
+        with (
+            patch.object(jobs, "click_mouse", side_effect=fake_click_mouse),
+            patch.object(jobs, "find_image_on_screen", side_effect=fake_find_image),
+        ):
+            started = jobs.start_click_interval_job(
+                interval_seconds=0.10,
+                position_mode="current",
+                stop_image_path=str(fake_template),
+                max_seconds=2.0,
+            )
+            job_id = started["job"]["job_id"]
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                state = jobs.get_job_status(job_id)["job"]
+                if state["state"] != "running":
+                    break
+                time.sleep(0.03)
+            final = jobs.get_job_status(job_id)["job"]
+            check(final["state"] == "completed", f"visual chain ended as {final['state']}")
+            check(final["stop_reason"] == "stop_image_found", f"wrong stop reason: {final['stop_reason']}")
+            check(final["runs"] == 2, f"expected 2 clicks before visual stop, got {final['runs']}")
+
+    return [
+        run_case("Desktop: screenshot + template matching", screenshot_and_template_match),
+        run_case("Desktop: screen/cursor smoke", screen_cursor_smoke),
+        run_case("Desktop: background click scheduler (mocked)", scheduler_mocked),
+        run_case("Desktop: visual stop condition (mocked)", visual_stop_condition_mocked),
+    ]
 
 
 def mcp_suite() -> list[bool]:
@@ -346,6 +507,23 @@ def benchmark_harness_suite() -> list[bool]:
             check("benchmark_server.py" in text, "isolated Goose config does not target benchmark_server.py")
             check("enabled: true" in text, "benchmark extension is not enabled")
 
+    def fixture_root_replaces_normal_roots():
+        import benchmark_server
+        import config
+        import filesystem
+
+        previous = list(config.ALLOWED_ROOTS)
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                fixture = Path(temp).resolve()
+                config.ALLOWED_ROOTS[:] = [Path(r"C:\Users\example\private")]
+                with patch.dict(os.environ, {benchmark_server.BENCHMARK_FIXTURE_ROOT_ENV: str(fixture)}):
+                    benchmark_server._allow_fixture_root()
+                check(config.ALLOWED_ROOTS == [fixture], "benchmark inherited normal filesystem roots")
+                check(filesystem._resolved_roots() == [fixture], "filesystem did not see benchmark-only root")
+        finally:
+            config.ALLOWED_ROOTS[:] = previous
+
     def tool_selection_uses_start_records():
         case = benchmark_goose.Case(
             "recovery",
@@ -370,6 +548,7 @@ def benchmark_harness_suite() -> list[bool]:
     return [
         run_case("Benchmark: exact-answer grading", exact_answer_grading),
         run_case("Benchmark: isolated Goose config", isolated_config_points_to_benchmark_server),
+        run_case("Benchmark: fixture root isolation", fixture_root_replaces_normal_roots),
         run_case("Benchmark: tool-start selection trace", tool_selection_uses_start_records),
     ]
 
