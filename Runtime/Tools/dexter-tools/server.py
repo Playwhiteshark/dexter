@@ -3,14 +3,23 @@ from __future__ import annotations
 from typing import Literal
 
 from mcp.server import MCPServer
+from mcp.server.mcpserver import Image as MCPImage
+from mcp_types import ToolAnnotations
 
-try:
-    from mcp_types import ToolAnnotations
-except ImportError:
-    ToolAnnotations = None  # type: ignore[assignment]
-
+import agent_results as agent
 from clipboard_tools import get_clipboard_text, set_clipboard_text
 from computer_tools import ComputerAction, perform_computer_action
+from config import (
+    DEFAULT_CLIPBOARD_CHARS,
+    DEFAULT_CONTENT_MATCHES,
+    DEFAULT_CONTENT_MATCHES_PER_FILE,
+    DEFAULT_LIST_ENTRIES,
+    DEFAULT_PROCESS_RESULTS,
+    DEFAULT_READ_CHARS,
+    DEFAULT_READ_LINES,
+    DEFAULT_SEARCH_RESULTS,
+    DEFAULT_WINDOW_RESULTS,
+)
 from filesystem import (
     copy_file_verified,
     create_directory_verified,
@@ -25,6 +34,7 @@ from filesystem import (
     search_paths,
     search_text_contents,
 )
+from image_tools import load_image_for_model
 from jobs import (
     cancel_background_job,
     get_job_status,
@@ -39,11 +49,7 @@ from launcher import (
     open_http_url,
 )
 from process_tools import list_processes_info, process_running
-from screen_tools import (
-    capture_screenshot,
-    find_image_on_screen,
-    wait_for_image_on_screen,
-)
+from screen_tools import capture_screenshot, find_image_on_screen, wait_for_image_on_screen
 from windows_tools import (
     close_app_gracefully,
     close_window_gracefully,
@@ -54,102 +60,71 @@ from windows_tools import (
 )
 
 
-def _annotations(
-    *,
-    read_only: bool,
-    destructive: bool = False,
-    idempotent: bool = False,
-    open_world: bool = False,
-):
-    """Create MCP annotations while staying tolerant of SDK field aliases."""
-    if ToolAnnotations is None:
-        return None
-
-    values = {
-        "readOnlyHint": read_only,
-        "destructiveHint": destructive,
-        "idempotentHint": idempotent,
-        "openWorldHint": open_world,
-    }
-
-    try:
-        return ToolAnnotations(**values)
-    except Exception:
-        # Some generated/Pydantic variants expose snake_case constructor names.
-        try:
-            return ToolAnnotations(
-                read_only_hint=read_only,
-                destructive_hint=destructive,
-                idempotent_hint=idempotent,
-                open_world_hint=open_world,
-            )
-        except Exception:
-            return None
-
-
-READ_ONLY_LOCAL = _annotations(read_only=True, open_world=False)
-WRITE_LOCAL = _annotations(read_only=False, destructive=False, open_world=False)
-WRITE_IDEMPOTENT_LOCAL = _annotations(
-    read_only=False, destructive=False, idempotent=True, open_world=False
+READ_ONLY_LOCAL = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
 )
-DESTRUCTIVE_LOCAL = _annotations(read_only=False, destructive=True, open_world=False)
-OPEN_WORLD = _annotations(read_only=False, destructive=False, open_world=True)
+WRITE_LOCAL = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=False,
+    open_world_hint=False,
+)
+WRITE_IDEMPOTENT_LOCAL = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=True,
+    open_world_hint=False,
+)
+DESTRUCTIVE_LOCAL = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=True,
+    idempotent_hint=False,
+    open_world_hint=False,
+)
+OPEN_WORLD = ToolAnnotations(
+    read_only_hint=False,
+    destructive_hint=False,
+    idempotent_hint=False,
+    open_world_hint=True,
+)
 
 mcp = MCPServer(
     "Dexter Tools",
-    description=(
-        "Deterministic local-computer tools for Dexter. "
-        "Filesystem operations are restricted to configured roots; "
-        "app launching is restricted to configured aliases."
-    ),
+    description="Deterministic local-computer tools with configured filesystem and app boundaries.",
 )
 
 
-@mcp.tool(annotations=READ_ONLY_LOCAL)
-def dexter_ping() -> dict[str, str]:
-    """Check that the Dexter MCP tool server is reachable."""
-    return {
-        "status": "ok",
-        "server": "dexter-tools",
-        "message": "Dexter tools are reachable.",
-    }
-
-
-# ---------------------------------------------------------------------------
-# Batch 1: filesystem + launching
-# ---------------------------------------------------------------------------
+# Filesystem -----------------------------------------------------------------
 
 @mcp.tool(annotations=READ_ONLY_LOCAL)
 def list_allowed_directories() -> dict:
-    """List the filesystem roots Dexter is permitted to access."""
-    return list_allowed_roots()
+    """List filesystem roots Dexter may access."""
+    return agent.fields(list_allowed_roots(), "roots")
 
 
 @mcp.tool(annotations=READ_ONLY_LOCAL)
 def file_sha256(path: str) -> dict:
-    """Compute SHA-256 for one allowed regular file."""
-    return get_file_sha256(path)
+    """Compute SHA-256 for one allowed file."""
+    return agent.fields(get_file_sha256(path), "sha256")
 
 
 @mcp.tool(annotations=READ_ONLY_LOCAL)
 def file_info(path: str) -> dict:
     """Get metadata for one allowed file or directory."""
-    return get_path_info(path)
+    return agent.file_info(get_path_info(path))
 
 
 @mcp.tool(annotations=READ_ONLY_LOCAL)
 def list_directory(
     path: str,
-    max_entries: int = 200,
+    max_entries: int = DEFAULT_LIST_ENTRIES,
     include_hidden: bool = False,
 ) -> dict:
-    """
-    List one allowed directory.
-
-    Returns structured entries and truncation information. Hidden entries are
-    omitted by default to keep agent context small.
-    """
-    return list_directory_entries(path, max_entries, include_hidden)
+    """List one allowed directory; hidden entries are omitted by default."""
+    return agent.list_directory(list_directory_entries(path, max_entries, include_hidden))
 
 
 @mcp.tool(annotations=READ_ONLY_LOCAL)
@@ -159,22 +134,11 @@ def search_files(
     extensions: list[str] | None = None,
     include_directories: bool = False,
     include_hidden: bool = False,
-    max_results: int = 100,
+    max_results: int = DEFAULT_SEARCH_RESULTS,
 ) -> dict:
-    """
-    Recursively search names under one allowed root.
-
-    pattern is case-insensitive. Glob patterns such as *.py are supported;
-    otherwise it is treated as a substring. Common dependency/VCS directories
-    are skipped by default.
-    """
-    return search_paths(
-        root,
-        pattern,
-        extensions,
-        include_directories,
-        include_hidden,
-        max_results,
+    """Recursively find file/directory names under an allowed root."""
+    return agent.search_files(
+        search_paths(root, pattern, extensions, include_directories, include_hidden, max_results)
     )
 
 
@@ -185,23 +149,20 @@ def search_file_contents(
     extensions: list[str] | None = None,
     case_sensitive: bool = False,
     include_hidden: bool = False,
-    max_results: int = 100,
-    max_matches_per_file: int = 5,
+    max_results: int = DEFAULT_CONTENT_MATCHES,
+    max_matches_per_file: int = DEFAULT_CONTENT_MATCHES_PER_FILE,
 ) -> dict:
-    """
-    Search text file contents under one allowed root.
-
-    Returns path, line number, and a bounded matching line. Binary and very
-    large files are skipped rather than flooding context.
-    """
-    return search_text_contents(
-        root,
-        query,
-        extensions,
-        case_sensitive,
-        include_hidden,
-        max_results,
-        max_matches_per_file,
+    """Search text contents under an allowed root and return bounded matching lines."""
+    return agent.search_file_contents(
+        search_text_contents(
+            root,
+            query,
+            extensions,
+            case_sensitive,
+            include_hidden,
+            max_results,
+            max_matches_per_file,
+        )
     )
 
 
@@ -209,192 +170,159 @@ def search_file_contents(
 def read_file(
     path: str,
     start_line: int = 1,
-    max_lines: int = 400,
-    max_chars: int = 50_000,
+    max_lines: int = DEFAULT_READ_LINES,
+    max_chars: int = DEFAULT_READ_CHARS,
 ) -> dict:
-    """
-    Read a bounded section of an allowed text file.
+    """Read a bounded section of an allowed text file."""
+    return agent.read_file(read_text_file(path, start_line, max_lines, max_chars))
 
-    Binary/oversized files are rejected. Returns line range, encoding, total
-    lines, and whether the result was truncated.
-    """
-    return read_text_file(path, start_line, max_lines, max_chars)
+
+@mcp.tool(annotations=READ_ONLY_LOCAL)
+def read_image(path: str) -> MCPImage:
+    """Read an allowed local image for vision; common formats are normalized to PNG."""
+    image = load_image_for_model(path)
+    return MCPImage(data=image.data, format="png")
 
 
 @mcp.tool(annotations=WRITE_IDEMPOTENT_LOCAL)
 def create_directory(path: str) -> dict:
-    """
-    Create an allowed directory and any missing parents.
-
-    Idempotent: if the directory already exists, reports that without changing it.
-    """
-    return create_directory_verified(path)
+    """Create an allowed directory, including missing parents."""
+    return agent.fields(create_directory_verified(path), "path", "created", "already_existed")
 
 
 @mcp.tool(annotations=WRITE_LOCAL)
 def copy_file(source: str, destination: str) -> dict:
-    """
-    Copy one allowed file without overwriting.
-
-    Verifies destination existence, size, and SHA-256 equality.
-    """
-    return copy_file_verified(source, destination)
+    """Copy one allowed file without overwriting; verifies the copy internally."""
+    return agent.fields(copy_file_verified(source, destination), "destination")
 
 
 @mcp.tool(annotations=DESTRUCTIVE_LOCAL)
 def move_file(source: str, destination: str) -> dict:
-    """
-    Move one allowed file without overwriting.
-
-    Verifies source disappearance plus destination size and SHA-256.
-    """
-    return move_file_verified(source, destination)
+    """Move one allowed file without overwriting; verifies the move internally."""
+    return agent.fields(move_file_verified(source, destination), "destination")
 
 
 @mcp.tool(annotations=DESTRUCTIVE_LOCAL)
 def rename_file(path: str, new_name: str) -> dict:
-    """
-    Rename one allowed file in place.
-
-    new_name must be only a filename, not a path. Refuses overwrite and verifies
-    source disappearance plus destination hash/size.
-    """
-    return rename_file_verified(path, new_name)
+    """Rename one allowed file in place without overwriting."""
+    return agent.fields(rename_file_verified(path, new_name), "destination")
 
 
 @mcp.tool(annotations=DESTRUCTIVE_LOCAL)
 def delete_file(path: str) -> dict:
-    """
-    Send one allowed file to the Windows Recycle Bin.
+    """Send one allowed file to the Windows Recycle Bin."""
+    return agent.fields(delete_file_verified(path, permanent=False), "path", "method")
 
-    Verifies that the original path disappeared. Permanent deletion is not
-    exposed to the agent.
-    """
-    return delete_file_verified(path, permanent=False)
 
+# Launching ------------------------------------------------------------------
 
 @mcp.tool(annotations=READ_ONLY_LOCAL)
 def list_app_aliases() -> dict:
-    """List app aliases that open_app is explicitly permitted to launch."""
-    return list_app_aliases_configured()
+    """List configured aliases accepted by open_app."""
+    return agent.fields(list_app_aliases_configured(), "aliases")
 
 
 @mcp.tool(annotations=WRITE_LOCAL)
 def open_app(name: str, arguments: list[str] | None = None) -> dict:
-    """
-    Launch a configured app alias without invoking a shell.
-
-    Arbitrary executables/commands are rejected; add trusted apps to APP_ALIASES.
-    """
-    return launch_app(name, arguments)
+    """Launch a configured app alias without invoking a shell."""
+    result = launch_app(name, arguments)
+    return agent.fields(result, "pid", "process_alive_after_launch")
 
 
 @mcp.tool(annotations=WRITE_LOCAL)
 def open_file(path: str) -> dict:
-    """Open one allowed file with its Windows default application."""
-    return open_allowed_file(path)
+    """Open an allowed non-executable file with its Windows default app."""
+    open_allowed_file(path)
+    return {"opened": True}
 
 
 @mcp.tool(annotations=WRITE_LOCAL)
 def open_folder(path: str) -> dict:
-    """Open one allowed folder in the Windows shell."""
-    return open_allowed_folder(path)
+    """Open one allowed folder in Windows Explorer."""
+    open_allowed_folder(path)
+    return {"opened": True}
 
 
 @mcp.tool(annotations=OPEN_WORLD)
 def open_url(url: str) -> dict:
     """Open an http:// or https:// URL in the default browser."""
-    return open_http_url(url)
+    result = open_http_url(url)
+    return {"opened": bool(result.get("browser_accepted_request", False))}
 
 
-# ---------------------------------------------------------------------------
-# Batch 2: clipboard + processes + windows
-# ---------------------------------------------------------------------------
+# Clipboard / processes / windows -------------------------------------------
 
 @mcp.tool(annotations=READ_ONLY_LOCAL)
-def get_clipboard(max_chars: int = 50_000) -> dict:
+def get_clipboard(max_chars: int = DEFAULT_CLIPBOARD_CHARS) -> dict:
     """Read bounded text from the local clipboard."""
-    return get_clipboard_text(max_chars)
+    return agent.fields(get_clipboard_text(max_chars), "text", "length", "truncated")
 
 
 @mcp.tool(annotations=WRITE_LOCAL)
 def set_clipboard(text: str) -> dict:
-    """Set local clipboard text and verify the exact value round-tripped."""
-    return set_clipboard_text(text)
+    """Set local clipboard text and verify it round-tripped."""
+    return agent.fields(set_clipboard_text(text), "length")
 
 
 @mcp.tool(annotations=READ_ONLY_LOCAL)
-def list_processes(query: str | None = None, max_results: int = 100) -> dict:
-    """List local processes, optionally filtering by process name/path substring."""
-    return list_processes_info(query, max_results)
+def list_processes(query: str | None = None, max_results: int = DEFAULT_PROCESS_RESULTS) -> dict:
+    """List local processes, optionally filtering name/path text."""
+    return agent.processes(list_processes_info(query, max_results))
 
 
 @mcp.tool(annotations=READ_ONLY_LOCAL)
-def is_process_running(
-    pid: int | None = None,
-    name: str | None = None,
-) -> dict:
-    """Check whether a local process exists by PID, exact process name, or both."""
-    return process_running(pid, name)
+def is_process_running(pid: int | None = None, name: str | None = None) -> dict:
+    """Check for a process by PID, exact process name, or both."""
+    return agent.fields(process_running(pid, name), "running", "matches", "truncated")
 
 
 @mcp.tool(annotations=READ_ONLY_LOCAL)
 def get_foreground_window() -> dict:
-    """Return the current Windows foreground window, process, title, and bounds."""
-    return get_foreground_window_info()
+    """Return the current foreground window, process, and title."""
+    return agent.foreground_window(get_foreground_window_info())
 
 
 @mcp.tool(annotations=READ_ONLY_LOCAL)
 def list_windows(
     query: str | None = None,
-    max_results: int = 50,
+    max_results: int = DEFAULT_WINDOW_RESULTS,
     visible_only: bool = True,
 ) -> dict:
-    """List top-level Windows windows, optionally filtering title/process text."""
-    return list_visible_windows(query, max_results, visible_only)
+    """List top-level windows, optionally filtering title/process text."""
+    return agent.windows(list_visible_windows(query, max_results, visible_only))
 
 
 @mcp.tool(annotations=READ_ONLY_LOCAL)
 def get_window_bounds(hwnd: int) -> dict:
-    """Read pixel bounds for a current Windows window handle."""
-    return get_window_bounds_info(hwnd)
+    """Get pixel bounds for a current window handle."""
+    return agent.fields(get_window_bounds_info(hwnd), "bounds")
 
 
 @mcp.tool(annotations=WRITE_LOCAL)
 def focus_window(hwnd: int) -> dict:
-    """
-    Ask Windows to focus a window and verify it actually became foreground.
-
-    Windows may refuse focus stealing; that is reported as a failure rather
-    than pretending the focus changed.
-    """
-    return focus_window_verified(hwnd)
+    """Focus a window and verify Windows made it foreground."""
+    focus_window_verified(hwnd)
+    return {"focused": True}
 
 
 @mcp.tool(annotations=DESTRUCTIVE_LOCAL)
 def close_window(hwnd: int, timeout_seconds: float = 5.0) -> dict:
-    """
-    Gracefully request a window to close with WM_CLOSE.
-
-    Does not hard-kill the process. Reports if a save/confirmation prompt keeps
-    the window open.
-    """
-    return close_window_gracefully(hwnd, timeout_seconds)
+    """Gracefully request a window to close; never hard-kills its process."""
+    return agent.fields(close_window_gracefully(hwnd, timeout_seconds), "closed", "note")
 
 
 @mcp.tool(annotations=DESTRUCTIVE_LOCAL)
 def close_app(pid: int, timeout_seconds: float = 5.0) -> dict:
-    """
-    Gracefully close all top-level windows belonging to a process.
+    """Gracefully close a process through its top-level windows; never hard-kills."""
+    return agent.fields(
+        close_app_gracefully(pid, timeout_seconds),
+        "process_exited",
+        "remaining_windows",
+        "note",
+    )
 
-    Refuses to hard-kill a headless/no-window process.
-    """
-    return close_app_gracefully(pid, timeout_seconds)
 
-
-# ---------------------------------------------------------------------------
-# Batch 3: desktop control + screen matching + background jobs
-# ---------------------------------------------------------------------------
+# Desktop control ------------------------------------------------------------
 
 @mcp.tool(annotations=DESTRUCTIVE_LOCAL)
 def computer_action(
@@ -407,22 +335,18 @@ def computer_action(
     amount: int | None = None,
     duration: float = 0.2,
 ) -> dict:
-    """
-    Perform one deterministic mouse/keyboard/wait action.
-
-    Actions: screen_size, cursor_position, mouse_move, left_click, right_click,
-    middle_click, double_click, drag_to, scroll, key, hotkey, type, wait.
-    PyAutoGUI's corner fail-safe remains enabled.
-    """
-    return perform_computer_action(
-        action,
-        x=x,
-        y=y,
-        text=text,
-        key=key,
-        keys=keys,
-        amount=amount,
-        duration=duration,
+    """Perform one mouse/keyboard/wait action; screen_size and cursor_position are read-only actions."""
+    return agent.without_envelope(
+        perform_computer_action(
+            action,
+            x=x,
+            y=y,
+            text=text,
+            key=key,
+            keys=keys,
+            amount=amount,
+            duration=duration,
+        )
     )
 
 
@@ -435,12 +359,13 @@ def screenshot(
     height: int | None = None,
     overwrite: bool = False,
 ) -> dict:
-    """
-    Save the whole primary screen or a rectangular region to an allowed image path.
-
-    Refuses overwrite by default and verifies that a non-empty image was saved.
-    """
-    return capture_screenshot(output_path, x, y, width, height, overwrite)
+    """Save the whole primary screen or a rectangular region to an allowed image path."""
+    return agent.fields(
+        capture_screenshot(output_path, x, y, width, height, overwrite),
+        "path",
+        "width",
+        "height",
+    )
 
 
 @mcp.tool(annotations=READ_ONLY_LOCAL)
@@ -453,20 +378,11 @@ def find_image(
     height: int | None = None,
     grayscale: bool = False,
 ) -> dict:
-    """
-    Find a template image on the primary screen.
-
-    Returns found=false as a normal result when absent. confidence matching uses
-    OpenCV via PyAutoGUI/PyScreeze.
-    """
-    return find_image_on_screen(
-        template_path,
-        confidence,
-        x,
-        y,
-        width,
-        height,
-        grayscale,
+    """Find a template image on the primary screen; absence is a normal result."""
+    return agent.fields(
+        find_image_on_screen(template_path, confidence, x, y, width, height, grayscale),
+        "found",
+        "match",
     )
 
 
@@ -482,21 +398,22 @@ def wait_for_image(
     height: int | None = None,
     grayscale: bool = False,
 ) -> dict:
-    """
-    Poll for a template image until found or timeout.
-
-    A timeout is returned as found=false/timed_out=true, not raised as an error.
-    """
-    return wait_for_image_on_screen(
-        template_path,
-        timeout_seconds,
-        poll_interval_seconds,
-        confidence,
-        x,
-        y,
-        width,
-        height,
-        grayscale,
+    """Poll for a template image until found or the timeout expires."""
+    return agent.fields(
+        wait_for_image_on_screen(
+            template_path,
+            timeout_seconds,
+            poll_interval_seconds,
+            confidence,
+            x,
+            y,
+            width,
+            height,
+            grayscale,
+        ),
+        "found",
+        "match",
+        "timed_out",
     )
 
 
@@ -512,43 +429,38 @@ def start_click_job(
     stop_image_path: str | None = None,
     stop_image_confidence: float = 0.90,
 ) -> dict:
-    """
-    Start a cancellable background auto-click job.
-
-    position_mode='current' clicks wherever the cursor currently is on every
-    interval without moving it. position_mode='fixed' anchors to x/y, or to the
-    cursor position at job creation if x/y are omitted. Optional max_runs,
-    max_seconds, or stop_image_path provide deterministic stop conditions.
-    """
-    return start_click_interval_job(
-        interval_seconds=interval_seconds,
-        position_mode=position_mode,  # validated inside
-        x=x,
-        y=y,
-        button=button,  # validated inside
-        max_runs=max_runs,
-        max_seconds=max_seconds,
-        stop_image_path=stop_image_path,
-        stop_image_confidence=stop_image_confidence,
+    """Start a cancellable background click job with optional stop conditions."""
+    return agent.job(
+        start_click_interval_job(
+            interval_seconds=interval_seconds,
+            position_mode=position_mode,
+            x=x,
+            y=y,
+            button=button,
+            max_runs=max_runs,
+            max_seconds=max_seconds,
+            stop_image_path=stop_image_path,
+            stop_image_confidence=stop_image_confidence,
+        )
     )
 
 
 @mcp.tool(annotations=DESTRUCTIVE_LOCAL)
 def cancel_job(job_id: str, wait_seconds: float = 2.0) -> dict:
     """Cancel a Dexter background job and return its observed state."""
-    return cancel_background_job(job_id, wait_seconds)
+    return agent.job(cancel_background_job(job_id, wait_seconds))
 
 
 @mcp.tool(annotations=READ_ONLY_LOCAL)
 def job_status(job_id: str) -> dict:
-    """Get current state, run count, stop reason, and errors for one background job."""
-    return get_job_status(job_id)
+    """Get state, run count, stop reason, and error for one background job."""
+    return agent.job(get_job_status(job_id))
 
 
 @mcp.tool(annotations=READ_ONLY_LOCAL)
 def list_jobs(include_finished: bool = False) -> dict:
-    """List active Dexter background jobs, optionally including finished jobs."""
-    return list_background_jobs(include_finished)
+    """List active jobs, optionally including finished jobs."""
+    return agent.jobs(list_background_jobs(include_finished))
 
 
 if __name__ == "__main__":
