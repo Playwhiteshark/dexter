@@ -323,6 +323,57 @@ def mcp_suite() -> list[bool]:
     ]
 
 
+def benchmark_harness_suite() -> list[bool]:
+    import benchmark_goose
+
+    def exact_answer_grading():
+        check(
+            not benchmark_goose._has_exact_answer_line("loaded C:/tmp/red.webp", "RED"),
+            "incidental path text was mistaken for the final answer",
+        )
+        check(
+            benchmark_goose._has_exact_answer_line("status\nRED\n", "RED"),
+            "standalone answer line was not recognized",
+        )
+
+    def isolated_config_points_to_benchmark_server():
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = benchmark_goose._prepare_isolated_goose_root(Path(temp).resolve())
+            text = (root / "config" / "config.yaml").read_text(encoding="utf-8")
+            check("dexter_tools:" in text, "isolated Goose config is missing dexter_tools")
+            check("benchmark_server.py" in text, "isolated Goose config does not target benchmark_server.py")
+            check("enabled: true" in text, "benchmark extension is not enabled")
+
+    def tool_selection_uses_start_records():
+        case = benchmark_goose.Case(
+            "recovery",
+            "unused",
+            (
+                benchmark_goose.ExpectedCall("read_image", {"path": "bad.webp"}),
+                benchmark_goose.ExpectedCall("file_sha256", {"path": "good.txt"}),
+            ),
+        )
+        trace = [
+            {"event": "server_started"},
+            {"event": "tool_started", "tool": "read_image", "arguments": {"path": "bad.webp"}},
+            # A failed tool may not have a usable result record. The selection
+            # must still count because the benchmark saw the invocation begin.
+            {"event": "tool_started", "tool": "file_sha256", "arguments": {"path": "good.txt"}},
+            {"event": "tool_finished", "tool": "file_sha256", "arguments": {"path": "good.txt"}, "result": {"sha256": "abc"}},
+        ]
+        matched, observed = benchmark_goose._calls_match(trace, case)
+        check(matched, "tool-start records did not satisfy expected call sequence")
+        check(len(observed) == 2, "completion records leaked into selection grading")
+
+    return [
+        run_case("Benchmark: exact-answer grading", exact_answer_grading),
+        run_case("Benchmark: isolated Goose config", isolated_config_points_to_benchmark_server),
+        run_case("Benchmark: tool-start selection trace", tool_selection_uses_start_records),
+    ]
+
+
 def chains_suite() -> list[bool]:
     root = reset_test_root()
     _configure_root(root)
@@ -356,6 +407,7 @@ SUITES = {
     "images": image_suite,
     "desktop": desktop_suite,
     "mcp": mcp_suite,
+    "benchmark": benchmark_harness_suite,
     "chains": chains_suite,
 }
 

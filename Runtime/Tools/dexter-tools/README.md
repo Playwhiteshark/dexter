@@ -51,7 +51,7 @@ Exit old Goose sessions first so they cannot retain old MCP schemas/processes. T
 .\.venv\Scripts\python.exe .\benchmark_goose.py --context
 ```
 
-The benchmark uses an isolated Goose data root, `GOOSE_MODE=auto`, and a benchmark MCP server that reuses production schemas while simulating effectful tools. Defaults mirror the current Dexter stack and can be overridden with `DEXTER_BENCHMARK_PROVIDER`, `DEXTER_BENCHMARK_MODEL`, and `DEXTER_BENCHMARK_OLLAMA_HOST`. Production Goose remains `smart_approve`.
+The benchmark uses an isolated Goose data root, `GOOSE_MODE=auto`, and a benchmark MCP server that reuses production schemas while simulating effectful tools. The server writes a startup marker before any model call; if that marker is absent the runner reports a **HARNESS ERROR** instead of misgrading the model. Image cases explicitly target `dexter_tools` because Goose can expose another `read_image` with overlapping naming. Subprocess output is decoded as UTF-8 explicitly for Windows. Defaults mirror the current Dexter stack and can be overridden with `DEXTER_BENCHMARK_PROVIDER`, `DEXTER_BENCHMARK_MODEL`, and `DEXTER_BENCHMARK_OLLAMA_HOST`. Production Goose remains `smart_approve`.
 
 ## Safety defaults
 

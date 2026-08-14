@@ -46,6 +46,15 @@ def _trace_path() -> Path:
 
 
 def _json_safe(value: Any) -> Any:
+    data = getattr(value, "data", None)
+    image_format = getattr(value, "format", None)
+    if isinstance(data, bytes) and image_format is not None:
+        return {
+            "type": type(value).__name__,
+            "format": str(image_format),
+            "byte_length": len(data),
+            "signature_hex": data[:8].hex(),
+        }
     if isinstance(value, dict):
         return {str(key): _json_safe(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
@@ -57,9 +66,16 @@ def _json_safe(value: Any) -> Any:
     return {"type": type(value).__name__}
 
 
+def _append_event(event: str, **details: Any) -> None:
+    record = {"time": time.time(), "event": event, **_json_safe(details)}
+    with _trace_path().open("a", encoding="utf-8") as file:
+        file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 def _append_trace(tool: str, arguments: dict[str, Any], *, result: Any = None, error: Exception | None = None) -> None:
     record: dict[str, Any] = {
         "time": time.time(),
+        "event": "tool_finished",
         "session_id": os.environ.get("AGENT_SESSION_ID"),
         "tool": tool,
         "arguments": _json_safe(arguments),
@@ -135,6 +151,7 @@ def _is_read_only(tool: Any) -> bool:
 
 def _wrap_sync(name: str, original: Callable[..., Any], execute_real: bool) -> Callable[..., Any]:
     def wrapped(**arguments: Any) -> Any:
+        _append_event("tool_started", tool=name, arguments=arguments)
         try:
             result = original(**arguments) if execute_real else _simulate(name, arguments)
         except Exception as exc:
@@ -148,6 +165,7 @@ def _wrap_sync(name: str, original: Callable[..., Any], execute_real: bool) -> C
 
 def _wrap_async(name: str, original: Callable[..., Any], execute_real: bool) -> Callable[..., Any]:
     async def wrapped(**arguments: Any) -> Any:
+        _append_event("tool_started", tool=name, arguments=arguments)
         try:
             result = await original(**arguments) if execute_real else _simulate(name, arguments)
         except Exception as exc:
@@ -183,4 +201,9 @@ def install_safe_wrappers() -> None:
 if __name__ == "__main__":
     _allow_fixture_root()
     install_safe_wrappers()
+    _append_event(
+        "server_started",
+        tool_count=len(server.mcp._tool_manager.list_tools()),
+        fixture_root=os.environ.get(BENCHMARK_FIXTURE_ROOT_ENV),
+    )
     server.mcp.run()
