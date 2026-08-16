@@ -33,6 +33,7 @@ from filesystem import (
     rename_file_verified,
     search_paths,
     search_text_contents,
+    write_file_verified,
 )
 from image_tools import load_image_for_model
 from jobs import (
@@ -182,6 +183,24 @@ def read_image(path: str) -> MCPImage:
     """Read an allowed local image for vision; common formats are normalized to PNG."""
     image = load_image_for_model(path)
     return MCPImage(data=image.data, format="png")
+
+
+@mcp.tool(annotations=DESTRUCTIVE_LOCAL)
+def write_file(
+    path: str,
+    content: str,
+    overwrite: bool = False,
+) -> dict:
+    """Create a UTF-8 text file at an exact allowed path.
+
+    path is the complete file path, including the filename and extension when
+    one is desired. Extensionless files such as Dockerfile and .gitignore are
+    valid. The parent directory must already exist. Existing files are refused
+    unless overwrite=true.
+    """
+    return agent.write_file(
+        write_file_verified(path, content, overwrite)
+    )
 
 
 @mcp.tool(annotations=WRITE_IDEMPOTENT_LOCAL)

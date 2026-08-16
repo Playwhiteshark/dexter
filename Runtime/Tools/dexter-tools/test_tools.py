@@ -106,6 +106,7 @@ def filesystem_suite() -> list[bool]:
         check(server.list_directory.__defaults__[0] == 50, "list_directory default changed")
         check(server.search_files.__defaults__[-1] == 25, "search_files default changed")
         check(server.read_file.__defaults__[1:] == (160, 12_000), "read_file defaults changed")
+        check(server.write_file.__defaults__ == (False,), "write_file overwrite default changed")
 
     def verified_file_operations():
         review = root / "Review"
@@ -131,6 +132,77 @@ def filesystem_suite() -> list[bool]:
         check(result == {"destination": str(moved.resolve())}, f"move result too noisy: {result}")
         trace_mutation("move_file", source=str(renamed), destination=str(moved))
         check(source.exists() and moved.exists() and not renamed.exists(), "copy/move postconditions failed")
+
+    def verified_text_write():
+        target = root / "approval_text.txt"
+
+        result = server.write_file(str(target), "original")
+        check(
+            result == {
+                "path": str(target.resolve()),
+                "created": True,
+                "overwritten": False,
+                "size_bytes": len(b"original"),
+            },
+            f"write result too noisy or incorrect: {result}",
+        )
+        check(target.read_bytes() == b"original", "write_file bytes differ from requested content")
+        trace_mutation("write_file", path=str(target), overwrite=False)
+
+        try:
+            server.write_file(str(target), "must-not-replace")
+        except FileExistsError as exc:
+            check("already exists" in str(exc).lower(), "overwrite refusal is not actionable")
+        else:
+            raise AssertionError("write_file overwrote an existing file by default")
+
+        replacement = "changed\nπ"
+        result = server.write_file(str(target), replacement, overwrite=True)
+        check(
+            result == {
+                "path": str(target.resolve()),
+                "created": False,
+                "overwritten": True,
+                "size_bytes": len(replacement.encode("utf-8")),
+            },
+            f"overwrite result too noisy or incorrect: {result}",
+        )
+        check(
+            target.read_bytes() == replacement.encode("utf-8"),
+            "overwrite did not preserve exact UTF-8 bytes",
+        )
+        trace_mutation("write_file", path=str(target), overwrite=True)
+
+        extensionless = root / "Dockerfile"
+        server.write_file(str(extensionless), "FROM scratch\n")
+        check(extensionless.read_bytes() == b"FROM scratch\n", "extensionless file write failed")
+
+        directory_target = root / "not-a-file.txt"
+        directory_target.mkdir()
+        try:
+            server.write_file(str(directory_target), "no")
+        except IsADirectoryError:
+            pass
+        else:
+            raise AssertionError("write_file accepted a directory as the target file")
+
+        missing_parent = root / "missing-parent" / "file.txt"
+        try:
+            server.write_file(str(missing_parent), "no")
+        except FileNotFoundError:
+            pass
+        else:
+            raise AssertionError("write_file implicitly created a missing parent directory")
+
+        outside = root.parent / "dexter-outside-write.txt"
+        try:
+            server.write_file(str(outside), "no")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("write_file accepted an outside-root path")
+        finally:
+            outside.unlink(missing_ok=True)
 
     def undecodable_text_errors_cleanly():
         path = root / "undefined-cp1252.txt"
@@ -158,6 +230,7 @@ def filesystem_suite() -> list[bool]:
         run_case("Filesystem: root boundary + read", boundary_and_reads),
         run_case("Filesystem: compact defaults", compact_defaults),
         run_case("Filesystem: verified create/copy/rename/move + compact results", verified_file_operations),
+        run_case("Filesystem: verified UTF-8 write + overwrite/boundary guards", verified_text_write),
         run_case("Filesystem: undecodable text fails cleanly", undecodable_text_errors_cleanly),
         run_case("Filesystem: overwrite refusal", overwrite_refused),
     ]
@@ -459,8 +532,9 @@ def mcp_suite() -> list[bool]:
         manager = server.mcp._tool_manager
         tools = manager.list_tools()
         names = [tool.name for tool in tools]
-        check(len(names) == 36, f"expected 36 model-facing tools, got {len(names)}")
+        check(len(names) == 37, f"expected 37 model-facing tools, got {len(names)}")
         check("read_image" in names, "read_image not registered")
+        check("write_file" in names, "write_file not registered")
         check("dexter_ping" not in names, "dexter_ping should be replaced by read_image")
         for tool in tools:
             check(tool.annotations is not None, f"missing annotations: {tool.name}")

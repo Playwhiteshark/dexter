@@ -420,6 +420,91 @@ def read_text_file(
         ),
     }
 
+
+def write_file_verified(
+    path: str,
+    content: str,
+    overwrite: bool = False,
+) -> dict:
+    """Create or overwrite a UTF-8 text file and verify the exact bytes written.
+
+    ``path`` is the complete target path, including the filename and extension
+    when one is desired. Extensionless files such as ``Dockerfile`` or
+    ``.gitignore`` are valid.
+
+    Existing files are rejected unless ``overwrite=True``. Parent directories
+    are never created implicitly.
+    """
+    target = resolve_allowed_path(path)
+
+    if not isinstance(content, str):
+        raise TypeError("content must be a string.")
+
+    existed_before = target.exists()
+
+    if existed_before:
+        if target.is_dir():
+            raise IsADirectoryError(
+                "Cannot write file because a directory exists at the target "
+                f"path: {target}"
+            )
+        if not target.is_file():
+            raise ValueError(
+                "Cannot write file because the target is not a regular file: "
+                f"{target}"
+            )
+        if not overwrite:
+            raise FileExistsError(
+                f"File already exists and overwrite is false: {target}"
+            )
+
+    _require_directory(target.parent, "Parent directory")
+
+    encoded = content.encode("utf-8")
+    expected_hash = hashlib.sha256(encoded).hexdigest()
+
+    # Binary mode avoids Windows newline translation, so verification is for
+    # the exact UTF-8 bytes corresponding to ``content``.
+    mode = "wb" if overwrite else "xb"
+    try:
+        with target.open(mode) as file:
+            file.write(encoded)
+            file.flush()
+            os.fsync(file.fileno())
+    except FileExistsError:
+        # Preserve overwrite=False if another process creates the target after
+        # the initial existence check.
+        raise FileExistsError(
+            f"File already exists and overwrite is false: {target}"
+        ) from None
+
+    if not target.is_file():
+        raise RuntimeError("Write returned but the target file does not exist.")
+
+    written_bytes = target.read_bytes()
+    actual_hash = hashlib.sha256(written_bytes).hexdigest()
+    size_matches = len(written_bytes) == len(encoded)
+    bytes_match = written_bytes == encoded
+    hashes_match = actual_hash == expected_hash
+
+    if not size_matches or not bytes_match or not hashes_match:
+        raise RuntimeError(
+            "Write completed but exact-content verification failed."
+        )
+
+    return {
+        "status": "ok",
+        "operation": "write_file",
+        "path": str(target),
+        "encoding": "utf-8",
+        "created": not existed_before,
+        "overwritten": existed_before,
+        "size_bytes": len(written_bytes),
+        "sha256": actual_hash,
+        "verified": True,
+    }
+
+
 def search_text_contents(
     root: str,
     query: str,
