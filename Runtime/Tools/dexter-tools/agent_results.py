@@ -56,6 +56,15 @@ def read_file(result: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+
+def write_file(result: dict[str, Any]) -> dict[str, Any]:
+    """Return only the useful conclusion of a verified text-file write."""
+    return fields(
+        result,
+        "path", "created", "overwritten", "size_bytes",
+    )
+
+
 def processes(result: dict[str, Any]) -> dict[str, Any]:
     items = [fields(item, "pid", "name", "exe", "username") for item in result.get("processes", [])]
     return {"processes": items, "truncated": bool(result.get("truncated", False))}
