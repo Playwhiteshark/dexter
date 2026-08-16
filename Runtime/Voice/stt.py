@@ -82,7 +82,6 @@ class VoiceConfig:
         "Gemma 4",
         "Goose",
         "MCP",
-        "Dexter model gateway",
     )
 
 
@@ -262,6 +261,11 @@ class VoiceInput:
                 update_interval=self.config.update_interval_seconds,
                 options={
                     "keyterm_boost": self.config.keyterm_boost,
+                    # Keep the endpoint detector responsive enough that the
+                    # 0.60 s synthetic post-roll has comfortable margin. The
+                    # library default is 0.5 s, which proved too close to the
+                    # PTT release boundary in Dexter's earlier tests.
+                    "vad_window_duration": "0.20",
                     # One local speaker; speaker ID adds work we do not use.
                     "identify_speakers": "false",
                 },
@@ -408,6 +412,15 @@ class VoiceInput:
         now = time.perf_counter()
 
         with self._capture_lock:
+            # One Moonshine worker owns one active stream. Do not accept a new
+            # PTT session until the previous one has fully finalized, otherwise
+            # its audio can sit behind the previous stream and lose live timing.
+            if (
+                self._current_capture_session is not None
+                or self._unfinalized_sessions > 0
+            ):
+                return
+
             self._next_session_id += 1
             self._unfinalized_sessions += 1
             session = _Session(
