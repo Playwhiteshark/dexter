@@ -56,6 +56,14 @@ Diagnostics/jarvis-config-audit_*.md
 Runtime/Tools/dexter-tools.zip
 Runtime/Tools/dexter-tools-v0.1/
 
+# Dexter voice prototype
+Runtime/Voice/stt_prototype.py
+Runtime/Voice/.venv/
+Runtime/Voice/debug/
+Runtime/Voice/ptt_debug/
+Runtime/Voice/*.wav
+Runtime/Voice/__pycache__/
+
 # ============================================================
 # Large model weights if added later
 # Keep Modelfiles and model configuration.
@@ -73,3 +81,5 @@ Runtime/Tools/dexter-tools-v0.1/
 .idea/
 .DS_Store
 Thumbs.db
+Runtime/Host/.venv/
+Runtime/Host/__pycache__/
