@@ -6,14 +6,17 @@ Presentation-only: no Moonshine, Goose, ACP, or Dexter tools.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
+import random
 
-from PySide6.QtCore import QPoint, QTimer, Qt, Signal, Slot
+from PySide6.QtCore import QPoint, QPointF, QSize, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import QColor, QCursor, QMouseEvent, QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -21,6 +24,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from Runtime.Host.thinking_messages import THINKING_MESSAGES
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +47,95 @@ class _DragHandle(QFrame):
                 event.accept()
                 return
         super().mousePressEvent(event)
+
+
+class _ThinkingWave(QWidget):
+    """Small animated status line with a sine-wave character jiggle."""
+
+    _FRAME_MS = 55
+    _MESSAGE_MS = 3400
+    _AMPLITUDE = 0.8
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("thinkingWave")
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.setMinimumHeight(24)
+
+        self._messages = tuple(THINKING_MESSAGES) or ("Thinking…",)
+        self._message = random.choice(self._messages)
+        self._phase = 0.0
+
+        self._animation_timer = QTimer(self)
+        self._animation_timer.setInterval(self._FRAME_MS)
+        self._animation_timer.timeout.connect(self._advance_wave)
+
+        self._message_timer = QTimer(self)
+        self._message_timer.setInterval(self._MESSAGE_MS)
+        self._message_timer.timeout.connect(self._rotate_message)
+
+        self.hide()
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt API
+        return QSize(240, 24)
+
+    def start(self) -> None:
+        if not self.isVisible():
+            self._rotate_message()
+            self.show()
+        if not self._animation_timer.isActive():
+            self._animation_timer.start()
+        if not self._message_timer.isActive():
+            self._message_timer.start()
+
+    def stop(self) -> None:
+        self._animation_timer.stop()
+        self._message_timer.stop()
+        self.hide()
+
+    def _advance_wave(self) -> None:
+        self._phase += 0.34
+        self.update()
+
+    def _rotate_message(self) -> None:
+        if len(self._messages) == 1:
+            self._message = self._messages[0]
+        else:
+            choices = [m for m in self._messages if m != self._message]
+            self._message = random.choice(choices)
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setPen(QColor(255, 255, 255, 150))
+
+        font = self.font()
+        font.setPointSizeF(max(8.5, font.pointSizeF() - 0.5))
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+
+        x = 2.0
+        baseline = (
+            (self.height() - metrics.height()) / 2.0
+            + metrics.ascent()
+        )
+
+        available = max(0, self.width() - 4)
+        for index, char in enumerate(self._message):
+            width = metrics.horizontalAdvance(char)
+            if x + width > available:
+                break
+
+            offset = math.sin(self._phase + index * 0.55) * self._AMPLITUDE
+            painter.drawText(QPointF(x, baseline + offset), char)
+            x += width
+
+        painter.end()
 
 
 class _MessageCard(QFrame):
@@ -69,8 +163,11 @@ class _MessageCard(QFrame):
             QSizePolicy.Policy.Minimum,
         )
 
+        self.thinking_wave = _ThinkingWave()
+
         layout.addWidget(self.role_label)
         layout.addWidget(self.body_label)
+        layout.addWidget(self.thinking_wave)
 
     def set_text(self, text: str) -> None:
         self.body_label.setText(text)
@@ -78,6 +175,12 @@ class _MessageCard(QFrame):
     def append_text(self, text: str) -> None:
         if text:
             self.body_label.setText(self.body_label.text() + text)
+
+    def start_thinking(self) -> None:
+        self.thinking_wave.start()
+
+    def stop_thinking(self) -> None:
+        self.thinking_wave.stop()
 
     def finalize_user(self) -> None:
         self.setProperty("draft", False)
@@ -139,7 +242,7 @@ class _ApprovalCard(QFrame):
             button.setProperty("emphasized", option.emphasized)
             button.setMinimumWidth(0)
             button.setSizePolicy(
-                QSizePolicy.Policy.Ignored,
+                QSizePolicy.Policy.Minimum,
                 QSizePolicy.Policy.Fixed,
             )
             button.clicked.connect(
@@ -160,6 +263,9 @@ class DexterOverlay(QWidget):
 
     approval_selected = Signal(str)
     minimize_requested = Signal()
+    prompt_submitted = Signal(str)
+    cancel_requested = Signal()
+    clear_chat_requested = Signal()
 
     # The entire band is a real painted (near-invisible) mouse surface.
     # 14 px is intentionally easier to acquire than the first demo's 8 px.
@@ -186,7 +292,19 @@ class DexterOverlay(QWidget):
         self._draft_card: _MessageCard | None = None
         self._assistant_card: _MessageCard | None = None
         self._approval_card: _ApprovalCard | None = None
+        self._prompt_input_available = True
+        self._agent_busy = False
+        self._cancel_enabled = True
+        self._recording = False
+        self._clear_chat_enabled = False
         self._permanent_cards: list[_MessageCard] = []
+
+        self._thinking_resume_timer = QTimer(self)
+        self._thinking_resume_timer.setSingleShot(True)
+        self._thinking_resume_timer.setInterval(750)
+        self._thinking_resume_timer.timeout.connect(
+            self._resume_thinking_if_active
+        )
 
         self._build_ui()
         self._apply_style()
@@ -231,6 +349,15 @@ class DexterOverlay(QWidget):
             Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
         )
 
+        self.clear_button = QToolButton()
+        self.clear_button.setObjectName("clearButton")
+        self.clear_button.setText("Clear")
+        self.clear_button.setToolTip("Clear chat and start a new conversation")
+        self.clear_button.setAccessibleName("Clear Dexter chat")
+        self.clear_button.setAutoRaise(True)
+        self.clear_button.setEnabled(False)
+        self.clear_button.clicked.connect(self.clear_chat_requested.emit)
+
         self.minimize_button = QToolButton()
         self.minimize_button.setObjectName("minimizeButton")
         self.minimize_button.setText("—")
@@ -243,6 +370,7 @@ class DexterOverlay(QWidget):
         header_layout.addWidget(title)
         header_layout.addStretch(1)
         header_layout.addWidget(self.status_label)
+        header_layout.addWidget(self.clear_button)
         header_layout.addWidget(self.minimize_button)
         panel_layout.addWidget(header)
 
@@ -270,6 +398,56 @@ class DexterOverlay(QWidget):
         self.approval_host.setContentsMargins(0, 0, 0, 0)
         panel_layout.addLayout(self.approval_host)
 
+        # A deliberately small typed-input path. Voice remains the fastest
+        # interaction, but the host should never require speech for ordinary
+        # prompts.
+        composer = QFrame()
+        composer.setObjectName("composer")
+        composer_layout = QHBoxLayout(composer)
+        composer_layout.setContentsMargins(9, 5, 5, 5)
+        composer_layout.setSpacing(6)
+
+        self.prompt_input = QLineEdit()
+        self.prompt_input.setObjectName("promptInput")
+        self.prompt_input.setPlaceholderText("Type a message…")
+        self.prompt_input.setClearButtonEnabled(True)
+        self.prompt_input.returnPressed.connect(self._submit_prompt_input)
+
+        self.send_button = QToolButton()
+        self.send_button.setObjectName("sendButton")
+        self.send_button.setText("Send")
+        self.send_button.setToolTip("Send message")
+        self.send_button.setAccessibleName("Send message")
+        self.send_button.setAutoRaise(True)
+        self.send_button.setMinimumWidth(44)
+        self.send_button.clicked.connect(self._submit_prompt_input)
+
+        self.recording_dot = QLabel("●")
+        self.recording_dot.setObjectName("recordingDot")
+        self.recording_dot.setAccessibleName("Recording")
+        self.recording_dot.hide()
+
+        self.recording_label = QLabel("Recording…")
+        self.recording_label.setObjectName("recordingLabel")
+        self.recording_label.hide()
+
+        self.cancel_button = QToolButton()
+        self.cancel_button.setObjectName("cancelButton")
+        self.cancel_button.setText("Cancel")
+        self.cancel_button.setToolTip("Cancel current Dexter response")
+        self.cancel_button.setAccessibleName("Cancel current Dexter response")
+        self.cancel_button.setAutoRaise(True)
+        self.cancel_button.setMinimumWidth(52)
+        self.cancel_button.hide()
+        self.cancel_button.clicked.connect(self.cancel_requested.emit)
+
+        composer_layout.addWidget(self.prompt_input, 1)
+        composer_layout.addWidget(self.recording_dot)
+        composer_layout.addWidget(self.recording_label, 1)
+        composer_layout.addWidget(self.send_button)
+        composer_layout.addWidget(self.cancel_button)
+        panel_layout.addWidget(composer)
+
     def _apply_style(self) -> None:
         self.setStyleSheet(
             """
@@ -296,6 +474,21 @@ class DexterOverlay(QWidget):
                 font-size: 11px;
                 color: rgba(255, 255, 255, 145);
             }
+            QToolButton#clearButton {
+                background: transparent;
+                border: none;
+                border-radius: 5px;
+                color: rgba(255, 255, 255, 135);
+                font-size: 10px;
+                padding: 2px 5px;
+            }
+            QToolButton#clearButton:hover {
+                background-color: rgba(255, 255, 255, 24);
+                color: rgba(255, 255, 255, 225);
+            }
+            QToolButton#clearButton:disabled {
+                color: rgba(255, 255, 255, 55);
+            }
             QToolButton#minimizeButton {
                 background: transparent;
                 border: none;
@@ -311,6 +504,61 @@ class DexterOverlay(QWidget):
             }
             QToolButton#minimizeButton:pressed {
                 background-color: rgba(255, 255, 255, 38);
+            }
+            QFrame#composer {
+                background-color: rgba(255, 255, 255, 13);
+                border: 1px solid rgba(255, 255, 255, 27);
+                border-radius: 9px;
+            }
+            QLineEdit#promptInput {
+                background: transparent;
+                border: none;
+                padding: 4px 3px;
+                color: rgba(255, 255, 255, 238);
+                selection-background-color: rgba(255, 255, 255, 55);
+            }
+            QLineEdit#promptInput:disabled {
+                color: rgba(255, 255, 255, 105);
+            }
+            QLabel#recordingDot {
+                color: rgb(235, 74, 74);
+                font-size: 15px;
+                padding-left: 3px;
+            }
+            QLabel#recordingLabel {
+                color: rgba(255, 255, 255, 220);
+                font-weight: 600;
+                padding-left: 2px;
+            }
+            QToolButton#sendButton {
+                background-color: rgba(255, 255, 255, 18);
+                border: 1px solid rgba(255, 255, 255, 30);
+                border-radius: 6px;
+                padding: 4px 7px;
+                color: rgba(255, 255, 255, 190);
+            }
+            QToolButton#sendButton:hover {
+                background-color: rgba(255, 255, 255, 31);
+                color: rgba(255, 255, 255, 235);
+            }
+            QToolButton#sendButton:disabled {
+                color: rgba(255, 255, 255, 75);
+                border-color: rgba(255, 255, 255, 14);
+            }
+            QToolButton#cancelButton {
+                background-color: rgba(255, 255, 255, 18);
+                border: 1px solid rgba(255, 255, 255, 30);
+                border-radius: 6px;
+                padding: 4px 7px;
+                color: rgba(255, 255, 255, 200);
+            }
+            QToolButton#cancelButton:hover {
+                background-color: rgba(255, 255, 255, 34);
+                color: rgba(255, 255, 255, 245);
+            }
+            QToolButton#cancelButton:disabled {
+                color: rgba(255, 255, 255, 75);
+                border-color: rgba(255, 255, 255, 14);
             }
             QScrollArea#historyScroll, QWidget#historyWidget {
                 background: transparent;
@@ -411,6 +659,71 @@ class DexterOverlay(QWidget):
     def set_status(self, status: str) -> None:
         self.status_label.setText(status)
 
+    @Slot()
+    def _submit_prompt_input(self) -> None:
+        text = self.prompt_input.text().strip()
+        if not text:
+            return
+        self.prompt_input.clear()
+        self.prompt_submitted.emit(text)
+
+    @Slot(bool)
+    def set_prompt_input_enabled(self, enabled: bool) -> None:
+        self._prompt_input_available = enabled
+        self._refresh_composer_state()
+
+    @Slot(bool)
+    def set_clear_chat_enabled(self, enabled: bool) -> None:
+        self._clear_chat_enabled = enabled
+        self.clear_button.setEnabled(enabled)
+
+    @Slot(bool)
+    def set_agent_busy(self, busy: bool) -> None:
+        self._agent_busy = busy
+        if not busy:
+            self._cancel_enabled = True
+        self._refresh_composer_state()
+
+    @Slot(bool)
+    def set_recording(self, recording: bool) -> None:
+        self._recording = recording
+        self._refresh_composer_state()
+
+    @Slot(bool)
+    def set_cancel_enabled(self, enabled: bool) -> None:
+        self._cancel_enabled = enabled
+        self.cancel_button.setEnabled(enabled and self._agent_busy)
+
+    def _refresh_composer_state(self) -> None:
+        can_prompt = (
+            self._prompt_input_available
+            and not self._agent_busy
+            and not self._recording
+        )
+
+        self.prompt_input.setEnabled(can_prompt)
+        self.prompt_input.setVisible(not self._recording)
+
+        self.recording_dot.setVisible(self._recording)
+        self.recording_label.setVisible(self._recording)
+
+        self.send_button.setEnabled(can_prompt)
+        self.send_button.setVisible(
+            not self._agent_busy and not self._recording
+        )
+
+        self.cancel_button.setVisible(
+            self._agent_busy and not self._recording
+        )
+        self.cancel_button.setEnabled(
+            self._agent_busy and self._cancel_enabled
+        )
+
+    @Slot()
+    def focus_prompt_input(self) -> None:
+        if self.prompt_input.isEnabled():
+            self.prompt_input.setFocus(Qt.FocusReason.OtherFocusReason)
+
     @Slot(str)
     def set_stt_partial(self, text: str) -> None:
         text = text.strip()
@@ -452,6 +765,7 @@ class DexterOverlay(QWidget):
         self.finish_assistant_response()
         self._assistant_card = _MessageCard("Dexter", "")
         self._insert_card(self._assistant_card)
+        self._assistant_card.start_thinking()
         self._scroll_to_bottom()
 
     @Slot(str)
@@ -461,13 +775,37 @@ class DexterOverlay(QWidget):
         if self._assistant_card is None:
             self.begin_assistant_response()
         assert self._assistant_card is not None
+
+        # Real output takes precedence. If output then goes quiet for a moment
+        # while the turn remains active (model pause/tool work), the wave comes
+        # back automatically.
+        self._assistant_card.stop_thinking()
+        self._thinking_resume_timer.stop()
         self._assistant_card.append_text(text)
+        self._thinking_resume_timer.start()
         self._scroll_to_bottom()
 
     @Slot()
+    def resume_thinking_indicator(self) -> None:
+        if self._assistant_card is not None and self._agent_busy:
+            self._assistant_card.start_thinking()
+            self._scroll_to_bottom()
+
+    def _resume_thinking_if_active(self) -> None:
+        if (
+            self._assistant_card is not None
+            and self._agent_busy
+            and self._approval_card is None
+        ):
+            self._assistant_card.start_thinking()
+            self._scroll_to_bottom()
+
+    @Slot()
     def finish_assistant_response(self) -> None:
+        self._thinking_resume_timer.stop()
         if self._assistant_card is None:
             return
+        self._assistant_card.stop_thinking()
         self._permanent_cards.append(self._assistant_card)
         self._assistant_card = None
         self._trim_history()
@@ -479,6 +817,10 @@ class DexterOverlay(QWidget):
         options: list[ApprovalOption],
     ) -> None:
         self.clear_approval()
+        self._thinking_resume_timer.stop()
+        if self._assistant_card is not None:
+            self._assistant_card.stop_thinking()
+
         if not options:
             return
 
@@ -500,6 +842,26 @@ class DexterOverlay(QWidget):
     def _approval_option_selected(self, option_id: str) -> None:
         self.approval_selected.emit(option_id)
         self.clear_approval()
+
+    @Slot()
+    def clear_history(self) -> None:
+        self._thinking_resume_timer.stop()
+        self.clear_approval()
+
+        if self._draft_card is not None:
+            self._remove_card(self._draft_card)
+            self._draft_card = None
+
+        if self._assistant_card is not None:
+            self._assistant_card.stop_thinking()
+            self._remove_card(self._assistant_card)
+            self._assistant_card = None
+
+        for card in list(self._permanent_cards):
+            self._remove_card(card)
+        self._permanent_cards.clear()
+
+        self._scroll_to_bottom()
 
     def _insert_card(self, card: _MessageCard) -> None:
         self.history_layout.addWidget(card)

@@ -224,6 +224,11 @@ class VoiceInput:
 
         self._work_queue: queue.Queue[object] = queue.Queue()
         self._stop_event = threading.Event()
+
+        # Host-controlled admission gate. This only blocks NEW PTT sessions;
+        # it never truncates a capture that is already in progress.
+        self._capture_enabled = threading.Event()
+        self._capture_enabled.set()
         self._worker_thread: threading.Thread | None = None
         self._hotkey_thread: threading.Thread | None = None
 
@@ -240,6 +245,22 @@ class VoiceInput:
     @property
     def sample_rate(self) -> int | None:
         return self._sample_rate
+
+    @property
+    def capture_enabled(self) -> bool:
+        return self._capture_enabled.is_set()
+
+    def set_capture_enabled(self, enabled: bool) -> None:
+        """Allow or reject future Ctrl+/ capture starts.
+
+        Disabling input deliberately does not interrupt a session already being
+        recorded or finalized. The host uses this while the agent is answering
+        so speech cannot become a hidden queued prompt.
+        """
+        if enabled:
+            self._capture_enabled.set()
+        else:
+            self._capture_enabled.clear()
 
     def start(self) -> None:
         """Load Moonshine, open the microphone, and begin global PTT polling."""
@@ -410,6 +431,12 @@ class VoiceInput:
 
     def _begin_capture(self) -> None:
         now = time.perf_counter()
+
+        # The host may deliberately disable PTT while Dexter is processing a
+        # turn. Ignore the press entirely; release/re-press is required after
+        # input is enabled again.
+        if not self._capture_enabled.is_set():
+            return
 
         with self._capture_lock:
             # One Moonshine worker owns one active stream. Do not accept a new
