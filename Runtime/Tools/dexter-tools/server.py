@@ -19,6 +19,8 @@ from config import (
     DEFAULT_READ_LINES,
     DEFAULT_SEARCH_RESULTS,
     DEFAULT_WINDOW_RESULTS,
+    DEFAULT_SAVED_SEARCH_RESULTS,
+    DEFAULT_WORKSPACE_LAUNCH_TIMEOUT_SECONDS,
 )
 from filesystem import (
     copy_file_verified,
@@ -50,6 +52,12 @@ from launcher import (
     open_http_url,
 )
 from process_tools import list_processes_info, process_running
+from resources import (
+    forget_resource,
+    open_saved_resource,
+    remember_resource as remember_resource_record,
+    search_resources,
+)
 from screen_tools import capture_screenshot, find_image_on_screen, wait_for_image_on_screen
 from windows_tools import (
     close_app_gracefully,
@@ -58,6 +66,13 @@ from windows_tools import (
     get_foreground_window_info,
     get_window_bounds_info,
     list_visible_windows,
+    set_window_state_verified,
+)
+from workspace_tools import (
+    forget_workspace,
+    restore_workspace as restore_saved_workspace,
+    save_workspace as save_current_workspace,
+    search_workspaces,
 )
 
 
@@ -233,6 +248,106 @@ def delete_file(path: str) -> dict:
     return agent.fields(delete_file_verified(path, permanent=False), "path", "method")
 
 
+# Persistent computer map / workspaces --------------------------------------
+
+@mcp.tool(annotations=WRITE_LOCAL)
+def remember_resource(
+    name: str,
+    kind: Literal["url", "folder", "file", "vscode", "visual_studio", "unity"],
+    target: str,
+    aliases: list[str] | None = None,
+    overwrite: bool = False,
+) -> dict:
+    """Remember a named URL, path, or development project for later lookup/opening."""
+    result = remember_resource_record(name, kind, target, aliases, overwrite)
+    resource = result["resource"]
+    return {
+        "name": resource["name"],
+        "kind": resource["kind"],
+        "created": result["created"],
+        "updated": result["updated"],
+    }
+
+
+@mcp.tool(annotations=READ_ONLY_LOCAL)
+def search_saved(
+    query: str | None = None,
+    category: Literal["all", "resources", "workspaces"] = "all",
+    max_results: int = DEFAULT_SAVED_SEARCH_RESULTS,
+) -> dict:
+    """Search Dexter's saved operational resources and workspace layouts by name."""
+    if category not in {"all", "resources", "workspaces"}:
+        raise ValueError("category must be all, resources, or workspaces.")
+
+    resources = []
+    workspaces = []
+    if category in {"all", "resources"}:
+        resource_result = search_resources(query=query, max_results=max_results)
+        resources = [
+            agent.fields(item, "id", "name", "kind", "target", "aliases")
+            for item in resource_result["resources"]
+        ]
+    if category in {"all", "workspaces"}:
+        workspace_result = search_workspaces(query=query, max_results=max_results)
+        workspaces = workspace_result["workspaces"]
+
+    return {
+        "resources": resources,
+        "workspaces": workspaces,
+    }
+
+
+@mcp.tool(annotations=OPEN_WORLD)
+def open_resource(name: str) -> dict:
+    """Open one previously saved resource by its name or alias."""
+    return agent.fields(open_saved_resource(name), "name", "kind", "opened")
+
+
+@mcp.tool(annotations=WRITE_LOCAL)
+def save_workspace(name: str, overwrite: bool = False) -> dict:
+    """Save the current user-facing Windows layout, including minimized restore positions."""
+    return agent.fields(
+        save_current_workspace(name, overwrite),
+        "name",
+        "window_count",
+        "created",
+        "updated",
+    )
+
+
+@mcp.tool(annotations=WRITE_LOCAL)
+def restore_workspace(
+    name: str,
+    launch_missing: bool = True,
+    timeout_seconds: float = DEFAULT_WORKSPACE_LAUNCH_TIMEOUT_SECONDS,
+) -> dict:
+    """Restore a saved Windows layout; safely relaunch known resources/apps when possible."""
+    return agent.fields(
+        restore_saved_workspace(name, launch_missing, timeout_seconds),
+        "name",
+        "restored_count",
+        "launched",
+        "missing",
+        "ambiguous",
+        "complete",
+    )
+
+
+@mcp.tool(annotations=DESTRUCTIVE_LOCAL)
+def forget_saved(
+    category: Literal["resource", "workspace"],
+    name: str,
+) -> dict:
+    """Forget one saved operational resource or workspace layout."""
+    if category == "resource":
+        result = forget_resource(name)
+    elif category == "workspace":
+        result = forget_workspace(name)
+    else:
+        raise ValueError("category must be resource or workspace.")
+    return agent.fields(result, "name", "deleted")
+
+
 # Launching ------------------------------------------------------------------
 
 @mcp.tool(annotations=READ_ONLY_LOCAL)
@@ -322,6 +437,16 @@ def focus_window(hwnd: int) -> dict:
     """Focus a window and verify Windows made it foreground."""
     focus_window_verified(hwnd)
     return {"focused": True}
+
+
+@mcp.tool(annotations=WRITE_IDEMPOTENT_LOCAL)
+def set_window_state(
+    hwnd: int,
+    state: Literal["normal", "minimized", "maximized"],
+) -> dict:
+    """Minimize, maximize, or restore/unminimize a window without closing it."""
+    result = set_window_state_verified(hwnd, state)
+    return agent.fields(result, "state")
 
 
 @mcp.tool(annotations=DESTRUCTIVE_LOCAL)

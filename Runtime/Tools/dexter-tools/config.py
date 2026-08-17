@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 
 try:
     import local_config as _local
@@ -12,9 +13,25 @@ except ModuleNotFoundError:
 # (or vice versa).
 _LOCAL_ALLOWED_ROOTS = getattr(_local, "ALLOWED_ROOTS", []) if _local else []
 _LOCAL_APP_ALIASES = getattr(_local, "APP_ALIASES", {}) if _local else {}
+_LOCAL_RESOURCE_APP_ALIASES = getattr(_local, "RESOURCE_APP_ALIASES", {}) if _local else {}
 
 ALLOWED_ROOTS = [Path(path).expanduser().resolve(strict=False) for path in _LOCAL_ALLOWED_ROOTS]
 APP_ALIASES = dict(_LOCAL_APP_ALIASES)
+RESOURCE_APP_ALIASES = {
+    "vscode": "vscode",
+    "visual_studio": "visual studio",
+    "unity": "unity",
+}
+RESOURCE_APP_ALIASES.update(_LOCAL_RESOURCE_APP_ALIASES)
+
+# Operational/computer memory is application state, not an allowed filesystem
+# root and not conversational/biographical memory. Keep it outside the repo by
+# default so it survives code updates and cannot be committed accidentally.
+_DEFAULT_STATE_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Dexter" / "state"
+STATE_DIR = Path(getattr(_local, "STATE_DIR", _DEFAULT_STATE_DIR)).expanduser().resolve(strict=False) if _local else _DEFAULT_STATE_DIR
+COMPUTER_MEMORY_PATH = STATE_DIR / "computer_memory.json"
+
+WORKSPACE_EXCLUDED_WINDOW_TITLES = {"Dexter"}
 
 # Normal model-facing defaults. Callers may explicitly request more up to the
 # safety ceilings below.
@@ -27,6 +44,8 @@ DEFAULT_READ_CHARS = 12_000
 DEFAULT_CLIPBOARD_CHARS = 10_000
 DEFAULT_PROCESS_RESULTS = 30
 DEFAULT_WINDOW_RESULTS = 30
+DEFAULT_SAVED_SEARCH_RESULTS = 10
+DEFAULT_WORKSPACE_LAUNCH_TIMEOUT_SECONDS = 6.0
 
 # open_file uses Windows file associations, so executable/script/shortcut types
 # are blocked to avoid bypassing open_app's explicit allowlist.

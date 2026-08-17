@@ -328,6 +328,7 @@ def system_suite() -> list[bool]:
     import launcher
     import process_tools
     import server
+    import windows_tools
 
     def compact_clipboard_contract():
         with patch("server.get_clipboard_text", return_value={"status": "ok", "text": "abc", "length": 3, "truncated": False}):
@@ -471,6 +472,62 @@ def system_suite() -> list[bool]:
                 "PID + partial process name matched unexpectedly",
             )
 
+    def window_state_control():
+        class FakeUser32:
+            def __init__(self):
+                self.state = "normal"
+                self.commands: list[int] = []
+
+            def IsWindow(self, hwnd):
+                return hwnd == 7
+
+            def ShowWindow(self, hwnd, command):
+                self.commands.append(command)
+                if command == windows_tools.SW_MINIMIZE:
+                    self.state = "minimized"
+                elif command == windows_tools.SW_SHOWMAXIMIZED:
+                    self.state = "maximized"
+                elif command == windows_tools.SW_RESTORE:
+                    self.state = "normal"
+                return 1
+
+            def IsIconic(self, hwnd):
+                return self.state == "minimized"
+
+            def IsZoomed(self, hwnd):
+                return self.state == "maximized"
+
+        fake = FakeUser32()
+        with (
+            patch.object(windows_tools, "user32", fake),
+            patch.object(windows_tools, "_require_windows", return_value=None),
+            patch.object(windows_tools.time, "sleep", return_value=None),
+        ):
+            minimized = windows_tools.set_window_state_verified(7, "minimized")
+            check(minimized["state"] == "minimized", "window did not minimize")
+
+            restored = windows_tools.set_window_state_verified(7, "normal")
+            check(restored["state"] == "normal", "window did not restore")
+
+            maximized = windows_tools.set_window_state_verified(7, "maximized")
+            check(maximized["state"] == "maximized", "window did not maximize")
+
+            try:
+                windows_tools.set_window_state_verified(7, "closed")
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("invalid window state was accepted")
+
+        check(
+            fake.commands == [
+                windows_tools.SW_MINIMIZE,
+                windows_tools.SW_RESTORE,
+                windows_tools.SW_SHOWMAXIMIZED,
+            ],
+            f"wrong ShowWindow commands: {fake.commands}",
+        )
+
     def open_url_result_contract():
         with patch(
             "server.open_http_url",
@@ -489,7 +546,162 @@ def system_suite() -> list[bool]:
         run_case("System: launcher policy guards", launcher_policy_guards),
         run_case("System: process wrapper", process_wrapper),
         run_case("System: optional Windows .exe process suffix", process_name_exe_suffix_optional),
+        run_case("System: window minimize/maximize/restore", window_state_control),
         run_case("System: open_url success contract", open_url_result_contract),
+    ]
+
+
+def memory_suite() -> list[bool]:
+    root = reset_test_root()
+    _configure_root(root)
+    import resources
+    import state_store
+    import workspace_tools
+
+    state_store.COMPUTER_MEMORY_PATH = root / "computer_memory.json"
+
+    def resource_round_trip_and_aliases():
+        saved = resources.remember_resource(
+            "Dexter GitHub",
+            "url",
+            "https://github.com/example/dexter",
+            aliases=["repo", "Dexter repo"],
+        )
+        check(saved["created"], "resource was not created")
+        found = resources.search_resources("repo")
+        check(len(found["resources"]) == 1, "resource alias search failed")
+        check(found["resources"][0]["name"] == "Dexter GitHub", "wrong resource returned")
+
+        with patch(
+            "resources.open_http_url",
+            return_value={"browser_accepted_request": True},
+        ) as mocked:
+            opened = resources.open_saved_resource("Dexter repo")
+        check(opened["opened"], "saved URL did not open")
+        mocked.assert_called_once_with("https://github.com/example/dexter")
+
+        try:
+            resources.remember_resource(
+                "Dexter GitHub",
+                "url",
+                "https://github.com/example/other",
+            )
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError("resource overwrite was allowed by default")
+
+    def typed_project_validation():
+        vscode = root / "CodeProject"
+        vscode.mkdir()
+        vs = root / "Solution.sln"
+        vs.write_text("Microsoft Visual Studio Solution File", encoding="utf-8")
+        unity = root / "UnityProject"
+        (unity / "ProjectSettings").mkdir(parents=True)
+        (unity / "ProjectSettings" / "ProjectVersion.txt").write_text(
+            "m_EditorVersion: 6000.0.0f1\n",
+            encoding="utf-8",
+        )
+
+        resources.remember_resource("Code project", "vscode", str(vscode))
+        resources.remember_resource("VS solution", "visual_studio", str(vs))
+        resources.remember_resource("Unity project", "unity", str(unity))
+        found = resources.search_resources()
+        kinds = {item["kind"] for item in found["resources"]}
+        check({"vscode", "visual_studio", "unity"} <= kinds, "typed project resources missing")
+
+    def typed_project_open_dispatch():
+        # Reuse records created by the previous case. Opening a saved project
+        # must use fixed, validated app-specific arguments rather than exposing
+        # arbitrary command-line execution to the model.
+        with patch("resources.launch_app_with_trusted_arguments") as launch:
+            resources.open_saved_resource("Code project")
+            launch.assert_called_once_with(
+                "vscode",
+                ["--new-window", str((root / "CodeProject").resolve())],
+            )
+
+        with patch("resources.launch_app_with_trusted_arguments") as launch:
+            resources.open_saved_resource("VS solution")
+            launch.assert_called_once_with(
+                "visual studio",
+                [str((root / "Solution.sln").resolve())],
+            )
+
+        with patch("resources.launch_app_with_trusted_arguments") as launch:
+            resources.open_saved_resource("Unity project")
+            launch.assert_called_once_with(
+                "unity",
+                ["-projectPath", str((root / "UnityProject").resolve())],
+            )
+
+    def workspace_capture_restore_and_forget():
+        fake_placement = {
+            "show_state": "minimized",
+            "show_cmd": 2,
+            "normal_bounds": {
+                "left": 10,
+                "top": 20,
+                "right": 810,
+                "bottom": 620,
+                "width": 800,
+                "height": 600,
+            },
+        }
+        captured = {
+            "status": "ok",
+            "windows": [
+                {
+                    "hwnd": 101,
+                    "title": "Notes",
+                    "pid": 1,
+                    "process_name": "notepad.exe",
+                    "exe": r"C:\Windows\System32\notepad.exe",
+                    "placement": fake_placement,
+                    "z_index": 0,
+                }
+            ],
+        }
+
+        with (
+            patch("workspace_tools.capture_workspace_windows", return_value=captured),
+            patch("workspace_tools.configured_app_alias_for_executable", return_value="notepad"),
+        ):
+            saved = workspace_tools.save_workspace("Focus")
+        check(saved["window_count"] == 1, "workspace did not capture one window")
+
+        current = {
+            "status": "ok",
+            "windows": [
+                {
+                    "hwnd": 202,
+                    "title": "Notes",
+                    "pid": 2,
+                    "process_name": "notepad.exe",
+                    "exe": r"C:\Windows\System32\notepad.exe",
+                    "placement": fake_placement,
+                    "z_index": 0,
+                }
+            ],
+        }
+        with (
+            patch("workspace_tools.capture_workspace_windows", return_value=current),
+            patch("workspace_tools.restore_window_placement") as restore,
+        ):
+            result = workspace_tools.restore_workspace("Focus", launch_missing=False)
+        check(result["complete"], f"workspace restore incomplete: {result}")
+        check(result["restored_count"] == 1, "workspace did not restore one window")
+        restore.assert_called_once_with(202, fake_placement)
+
+        deleted = workspace_tools.forget_workspace("Focus")
+        check(deleted["deleted"], "workspace was not forgotten")
+        check(not workspace_tools.search_workspaces()["workspaces"], "forgotten workspace remained")
+
+    return [
+        run_case("Memory: named resource aliases + overwrite guard", resource_round_trip_and_aliases),
+        run_case("Memory: typed development project validation", typed_project_validation),
+        run_case("Memory: typed project open dispatch", typed_project_open_dispatch),
+        run_case("Workspace: capture/restore placement + forget", workspace_capture_restore_and_forget),
     ]
 
 
@@ -601,9 +813,19 @@ def mcp_suite() -> list[bool]:
         manager = server.mcp._tool_manager
         tools = manager.list_tools()
         names = [tool.name for tool in tools]
-        check(len(names) == 37, f"expected 37 model-facing tools, got {len(names)}")
+        check(len(names) == 44, f"expected 44 model-facing tools, got {len(names)}")
         check("read_image" in names, "read_image not registered")
         check("write_file" in names, "write_file not registered")
+        for expected in (
+            "remember_resource",
+            "search_saved",
+            "open_resource",
+            "save_workspace",
+            "restore_workspace",
+            "forget_saved",
+            "set_window_state",
+        ):
+            check(expected in names, f"{expected} not registered")
         check("dexter_ping" not in names, "dexter_ping should be replaced by read_image")
         for tool in tools:
             check(tool.annotations is not None, f"missing annotations: {tool.name}")
@@ -726,6 +948,7 @@ SUITES = {
     "environment": environment_suite,
     "filesystem": filesystem_suite,
     "system": system_suite,
+    "memory": memory_suite,
     "images": image_suite,
     "desktop": desktop_suite,
     "mcp": mcp_suite,

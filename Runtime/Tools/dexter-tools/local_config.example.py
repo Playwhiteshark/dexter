@@ -11,3 +11,14 @@ APP_ALIASES = {
     #     "allow_arguments": False,
     # },
 }
+
+# Optional aliases used by saved project resources. The values refer to keys
+# in APP_ALIASES. Project paths themselves are still checked against ALLOWED_ROOTS.
+RESOURCE_APP_ALIASES = {
+    "vscode": "vscode",
+    "visual_studio": "visual studio",
+    "unity": "unity",
+}
+
+# Optional persistent-state location. If omitted, Dexter uses %LOCALAPPDATA%\Dexter\state on Windows.
+# STATE_DIR = r"C:\path\to\DexterState"

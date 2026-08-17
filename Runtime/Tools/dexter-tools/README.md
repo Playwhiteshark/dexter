@@ -66,3 +66,46 @@ The benchmark uses an isolated Goose data root, `GOOSE_MODE=auto`, and a benchma
 - Window closing is graceful; `close_app` does not hard-kill processes.
 - PyAutoGUI's corner fail-safe remains enabled.
 - Repeating click jobs are cancellable and can have run/time/visual stop conditions.
+
+## Persistent computer map and workspaces
+
+The model-facing catalog now includes a small persistent operational-memory layer:
+
+- `remember_resource(name, kind, target, aliases=None, overwrite=False)` stores a named URL, folder, file, VS Code workspace/folder, Visual Studio solution, or Unity project.
+- `search_saved(...)` retrieves only relevant saved resources/workspaces on demand.
+- `open_resource(name)` resolves a saved item internally and opens it through the existing safe launch boundaries.
+- `save_workspace(name)` captures the current user-facing top-level window layout.
+- `restore_workspace(name)` repositions matching open windows and can relaunch missing configured apps or saved development resources when a safe launch hint exists.
+- `forget_saved(category, name)` removes a stored resource/workspace.
+
+Operational memory is stored outside the repository by default at `%LOCALAPPDATA%\Dexter\state\computer_memory.json`. This is intentionally separate from conversation history and future biographical/profile memory. `STATE_DIR` may be overridden in ignored `local_config.py`.
+
+Resource paths remain subject to `ALLOWED_ROOTS`. Saving a resource does not create a new filesystem permission boundary.
+
+### Development-project launch aliases
+
+Saved VS Code, Visual Studio, and Unity projects use configured app aliases. By default Dexter expects aliases named `vscode`, `visual studio`, and `unity`. Override those names with `RESOURCE_APP_ALIASES` in `local_config.py` if needed. The project path is validated first and then passed through fixed app-specific arguments (`--new-window`, solution path, or `-projectPath`); arbitrary model-provided command arguments are not exposed.
+
+### Workspace behavior and current limits
+
+Workspace capture follows the established PowerToys Workspaces pattern: capture application windows, then restore by moving/resizing matching windows after they exist. Dexter also records each window's normal restore rectangle so minimized windows retain the place they should return to when unminimized. Covered/overlapping windows are separate top-level windows and are captured independently.
+
+A minimized window is still capturable: Windows `GetWindowPlacement` exposes its normal restore rectangle while minimized. Dexter therefore stores both the minimized state and the size/position the window will return to when restored. A genuinely closed window is different: if it is already closed when a new workspace is captured, there is no live window to inspect.
+
+Dexter also exposes `set_window_state(hwnd, state)` for explicit `normal`/restore, `minimized`, and `maximized` transitions. This is intentionally separate from `close_window`; asking to minimize a window should never close it.
+
+A genuinely closed window has no current HWND and therefore cannot be reconstructed from geometry alone. Dexter can reopen it only when the snapshot has a safe launch hint: a configured app alias or an automatically matched saved development resource. Browser tabs, Explorer folder identity, unsaved document state, and arbitrary application command lines are not inferred from window titles.
+
+Virtual-desktop orchestration is deliberately not implemented in this version. DWM-cloaked windows are omitted from capture, but Dexter does not enumerate, name, create, switch, or assign Windows virtual desktops yet.
+
+### Why these are normal tools, not dynamically exposed tools
+
+The operational-memory layer deliberately keeps a small stable model-facing API instead of changing the MCP tool list after `search_saved`. `open_resource` performs deterministic name/alias resolution internally, so a normal request such as "open my Dexter repo" can be one tool call; `search_saved` is mainly for discovery, ambiguity, or "what have I saved?" questions.
+
+This avoids turning saved projects into separate tool definitions and keeps resource data out of the prompt until it is requested. If Dexter's total catalog later becomes large enough to hurt selection/context measurably, deferred/tool-search loading should be implemented as a dedicated Host/provider feature and benchmarked rather than as a side effect of a memory lookup.
+
+### Browser and virtual-desktop follow-ups
+
+`remember_resource` can store an explicit HTTP/HTTPS URL now, but Dexter does not yet have a reliable primitive for reading the active Brave/Chrome tab URL. Do not infer URLs from browser window titles. A future browser-context adapter can make requests such as "remember this tab as Fleckle" deterministic.
+
+Windows virtual desktops are also intentionally deferred. The current workspace snapshot is scoped to non-cloaked user-facing top-level windows. A future virtual-desktop module can build on documented per-window desktop identity/move APIs, but desktop enumeration/naming/switching should not be implemented through undocumented shell interfaces without a separate decision and regression coverage.

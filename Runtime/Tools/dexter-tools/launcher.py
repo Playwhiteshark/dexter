@@ -57,14 +57,16 @@ def _resolve_app_alias(name: str) -> tuple[list[str], bool]:
     return parts, bool(config.get("allow_arguments", False))
 
 
-def launch_app(
+def _launch_configured_app(
     name: str,
     arguments: list[str] | None = None,
+    *,
+    require_argument_permission: bool,
 ) -> dict:
     command, allow_arguments = _resolve_app_alias(name)
     extra = arguments or []
 
-    if extra and not allow_arguments:
+    if extra and require_argument_permission and not allow_arguments:
         raise PermissionError(
             f"Arguments are disabled for app alias {name!r}. "
             "Use a dedicated Dexter tool such as open_file/open_folder instead."
@@ -109,6 +111,60 @@ def launch_app(
         # exit immediately; this is not necessarily a failure.
         "verified": alive,
     }
+
+
+def launch_app(
+    name: str,
+    arguments: list[str] | None = None,
+) -> dict:
+    return _launch_configured_app(
+        name,
+        arguments,
+        require_argument_permission=True,
+    )
+
+
+def launch_app_with_trusted_arguments(
+    name: str,
+    arguments: list[str],
+) -> dict:
+    """Launch a configured app with arguments produced by trusted code.
+
+    This is intentionally not model-facing. Callers must validate any paths or
+    other values before constructing the fixed argument list.
+    """
+    return _launch_configured_app(
+        name,
+        arguments,
+        require_argument_permission=False,
+    )
+
+
+def configured_app_alias_for_executable(exe_path: str | None) -> str | None:
+    """Return one configured alias whose executable matches exe_path."""
+    if not exe_path:
+        return None
+
+    target = os.path.normcase(os.path.abspath(exe_path))
+    target_name = os.path.basename(target)
+    matches: list[str] = []
+
+    for alias in APP_ALIASES:
+        try:
+            command, _allow_arguments = _resolve_app_alias(alias)
+        except ValueError:
+            continue
+        first = command[0]
+        if not first:
+            continue
+        candidate = os.path.normcase(first)
+        if os.path.isabs(candidate):
+            if os.path.normcase(os.path.abspath(candidate)) == target:
+                matches.append(alias)
+        elif os.path.basename(candidate) == target_name:
+            matches.append(alias)
+
+    return sorted(matches, key=lambda value: (len(value), value.casefold()))[0] if matches else None
 
 
 def open_allowed_file(path: str) -> dict:
