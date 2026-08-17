@@ -12,9 +12,11 @@ from config import RESOURCE_APP_ALIASES
 from filesystem import resolve_allowed_path
 from launcher import (
     launch_app_with_trusted_arguments,
+    launch_vscode_project,
     open_allowed_file,
     open_allowed_folder,
     open_http_url,
+    open_trusted_folder,
 )
 from saved_name_resolution import rank_named_records, resolve_named_record
 from state_store import load_state, mutate_state
@@ -108,6 +110,13 @@ def _all_identity_keys(record: dict) -> set[str]:
     return {_normalize(record["name"]), *(_normalize(v) for v in record.get("aliases", []))}
 
 
+def _target_key(value: str) -> str:
+    """Normalize one persisted filesystem target for same-project identity."""
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    return str(Path(value).expanduser().resolve(strict=False)).casefold()
+
+
 def _resolve_resource_record(query: str, state: dict | None = None) -> dict:
     clean = _validate_label(query, "resource name")
     records = list((state or load_state())["resources"].values())
@@ -167,6 +176,123 @@ def _remember_validated_resource(
             "resource": dict(resources[resource_id]),
             "created": existing_id is None,
             "updated": existing_id is not None,
+        }
+
+    return mutate_state(mutate)
+
+
+def _remember_current_vscode_record(
+    clean_name: str,
+    clean_target: str,
+    clean_aliases: list[str],
+    overwrite: bool,
+) -> dict:
+    """Upsert one bridge-identified project and repair old duplicate names."""
+    now = _utc_now()
+    requested_target = _target_key(clean_target)
+
+    def mutate(state: dict) -> dict:
+        resources = state["resources"]
+        target_matches = [
+            (resource_id, record)
+            for resource_id, record in resources.items()
+            if record.get("kind") == "vscode"
+            and _target_key(str(record.get("target") or "")) == requested_target
+        ]
+        name_match = next(
+            (
+                (resource_id, record)
+                for resource_id, record in resources.items()
+                if _normalize(record["name"]) == _normalize(clean_name)
+            ),
+            None,
+        )
+        target_ids = {resource_id for resource_id, _record in target_matches}
+
+        if name_match is not None and name_match[0] not in target_ids and not overwrite:
+            raise FileExistsError(
+                f"Saved resource name already belongs to another target: {clean_name!r}. "
+                "Use overwrite=true to replace it."
+            )
+
+        if name_match is not None:
+            keeper_id = name_match[0]
+        elif target_matches:
+            keeper_id = min(
+                target_matches,
+                key=lambda item: (str(item[1].get("created_utc") or ""), item[0]),
+            )[0]
+        else:
+            keeper_id = f"res_{uuid.uuid4().hex[:12]}"
+
+        involved_ids = target_ids | ({keeper_id} if keeper_id in resources else set())
+        merged_alias_candidates = [
+            *clean_aliases,
+            *(
+                alias
+                for _resource_id, record in target_matches
+                for alias in record.get("aliases", [])
+            ),
+        ]
+        merged_aliases: list[str] = []
+        seen = {_normalize(clean_name)}
+        for alias in merged_alias_candidates:
+            clean_alias = _validate_label(alias, "alias")
+            key = _normalize(clean_alias)
+            if key not in seen:
+                merged_aliases.append(clean_alias)
+                seen.add(key)
+                if len(merged_aliases) == 20:
+                    break
+        merged_aliases = _validate_aliases(merged_aliases)
+        requested_keys = {_normalize(clean_name), *(_normalize(alias) for alias in merged_aliases)}
+
+        for resource_id, record in resources.items():
+            if resource_id in involved_ids:
+                continue
+            collision = requested_keys & _all_identity_keys(record)
+            if collision:
+                raise ValueError(
+                    f"Resource name/alias conflicts with saved resource {record['name']!r}."
+                )
+
+        previous_names = sorted(
+            {
+                str(record["name"])
+                for _resource_id, record in target_matches
+                if _normalize(record["name"]) != _normalize(clean_name)
+            },
+            key=str.casefold,
+        )
+        created_utc = resources.get(keeper_id, {}).get("created_utc")
+        if not created_utc and target_matches:
+            created_utc = min(
+                str(record.get("created_utc") or now)
+                for _resource_id, record in target_matches
+            )
+
+        for resource_id in target_ids:
+            if resource_id != keeper_id:
+                del resources[resource_id]
+
+        created = not target_matches and name_match is None
+        resources[keeper_id] = {
+            "id": keeper_id,
+            "name": clean_name,
+            "kind": "vscode",
+            "target": clean_target,
+            "aliases": merged_aliases,
+            "created_utc": created_utc or now,
+            "updated_utc": now,
+        }
+        return {
+            "status": "ok",
+            "operation": "remember_current_project",
+            "resource": dict(resources[keeper_id]),
+            "created": created,
+            "updated": not created,
+            "renamed_from": previous_names,
+            "duplicates_consolidated": len(target_ids - {keeper_id}),
         }
 
     return mutate_state(mutate)
@@ -278,9 +404,8 @@ def remember_current_vscode_project(
             seen.add(key)
     clean_aliases = _validate_aliases(clean_aliases)
 
-    result = _remember_validated_resource(
+    result = _remember_current_vscode_record(
         clean_name,
-        "vscode",
         clean_target,
         clean_aliases,
         overwrite,
@@ -292,6 +417,54 @@ def remember_current_vscode_project(
         "active_file": session.get("active_file"),
     }
     return result
+
+
+def rename_resource(
+    query: str,
+    new_name: str,
+    keep_old_as_alias: bool = False,
+) -> dict:
+    """Rename one saved resource without changing its validated target."""
+    clean_new_name = _validate_label(new_name, "new name")
+    now = _utc_now()
+
+    def mutate(state: dict) -> dict:
+        record = _resolve_resource_record(query, state)
+        old_name = record["name"]
+        aliases = list(record.get("aliases", []))
+        if keep_old_as_alias and _normalize(old_name) != _normalize(clean_new_name):
+            aliases.insert(0, old_name)
+        aliases = [
+            alias for alias in aliases
+            if _normalize(alias) != _normalize(clean_new_name)
+        ]
+        aliases = _validate_aliases(aliases)
+        requested_keys = {
+            _normalize(clean_new_name),
+            *(_normalize(alias) for alias in aliases),
+        }
+
+        for resource_id, other in state["resources"].items():
+            if resource_id == record["id"]:
+                continue
+            if requested_keys & _all_identity_keys(other):
+                raise ValueError(
+                    f"Resource name/alias conflicts with saved resource {other['name']!r}."
+                )
+
+        record["name"] = clean_new_name
+        record["aliases"] = aliases
+        record["updated_utc"] = now
+        return {
+            "status": "ok",
+            "operation": "rename_resource",
+            "id": record["id"],
+            "old_name": old_name,
+            "name": clean_new_name,
+            "renamed": _normalize(old_name) != _normalize(clean_new_name),
+        }
+
+    return mutate_state(mutate)
 
 
 def search_resources(
@@ -326,10 +499,30 @@ def search_resources(
     }
 
 
-def open_saved_resource(query: str) -> dict:
+def open_saved_resource(query: str, mode: Literal["default", "location"] = "default") -> dict:
     record = _resolve_resource_record(query)
     kind = record["kind"]
     target = record["target"]
+
+    if mode not in {"default", "location"}:
+        raise ValueError("mode must be default or location.")
+
+    if mode == "location":
+        if kind == "url":
+            raise ValueError("A saved URL has no local folder to open.")
+        target_path = Path(target).expanduser().resolve(strict=False)
+        location = target_path if target_path.is_dir() else target_path.parent
+        open_trusted_folder(str(location))
+        return {
+            "status": "ok",
+            "operation": "open_resource",
+            "id": record["id"],
+            "name": record["name"],
+            "kind": kind,
+            "mode": "location",
+            "location": str(location),
+            "opened": True,
+        }
 
     if kind == "url":
         result = open_http_url(target)
@@ -342,7 +535,7 @@ def open_saved_resource(query: str) -> dict:
         opened = True
     elif kind == "vscode":
         alias = RESOURCE_APP_ALIASES.get("vscode", "vscode")
-        launch_app_with_trusted_arguments(alias, ["--new-window", target])
+        launch_vscode_project(target, configured_alias=alias)
         opened = True
     elif kind == "visual_studio":
         alias = RESOURCE_APP_ALIASES.get("visual_studio", "visual studio")
@@ -361,6 +554,7 @@ def open_saved_resource(query: str) -> dict:
         "id": record["id"],
         "name": record["name"],
         "kind": kind,
+        "mode": "default",
         "opened": opened,
     }
 

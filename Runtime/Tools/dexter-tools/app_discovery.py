@@ -356,6 +356,72 @@ def resolve_installed_app(name: str) -> AppCandidate:
             ) from None
 
 
+def resolve_installed_app_executable(
+    name: str,
+    accepted_executable_names: set[str],
+) -> str:
+    """Resolve a discovered Start Menu shortcut to a trusted executable.
+
+    This is for internal providers that need fixed, code-generated arguments.
+    The shortcut still comes from Windows' installed-app catalog; the resolved
+    target must be an existing executable with an explicitly accepted basename.
+    """
+    candidate = resolve_installed_app(name)
+    if candidate.source != "start_menu_shortcut":
+        raise FileNotFoundError(
+            f"Installed app {candidate.name!r} has no Start Menu shortcut target "
+            "that can safely receive arguments."
+        )
+
+    shortcut = Path(candidate.launch_target)
+    if not shortcut.is_absolute() or not shortcut.is_file():
+        raise FileNotFoundError(f"Discovered Start Menu shortcut no longer exists: {shortcut}")
+
+    script = (
+        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut($args[0]); "
+        "[Console]::Out.Write($s.TargetPath)"
+    )
+    try:
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                script,
+                str(shortcut),
+            ],
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            timeout=APP_DISCOVERY_POWERSHELL_TIMEOUT_SECONDS,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
+        raise FileNotFoundError(
+            f"Could not resolve installed app shortcut for {candidate.name!r}."
+        ) from exc
+
+    target = Path(completed.stdout.strip())
+    accepted = {value.casefold() for value in accepted_executable_names}
+    if (
+        completed.returncode != 0
+        or not target.is_absolute()
+        or not target.is_file()
+        or target.name.casefold() not in accepted
+    ):
+        raise FileNotFoundError(
+            f"Installed app shortcut for {candidate.name!r} did not resolve to "
+            f"an accepted executable ({', '.join(sorted(accepted_executable_names))})."
+        )
+    return str(target)
+
+
 def launch_installed_app(candidate: AppCandidate) -> dict:
     if os.name != "nt":
         raise RuntimeError("Installed-app launching is currently implemented for Windows only.")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import time
 import webbrowser
@@ -9,7 +10,11 @@ from urllib.parse import urlparse
 
 import psutil
 
-from app_discovery import launch_installed_app, resolve_installed_app
+from app_discovery import (
+    launch_installed_app,
+    resolve_installed_app,
+    resolve_installed_app_executable,
+)
 from config import APP_ALIASES, DANGEROUS_OPEN_FILE_EXTENSIONS
 from filesystem import resolve_allowed_path
 
@@ -172,6 +177,77 @@ def launch_app_with_trusted_arguments(
     )
 
 
+def _find_vscode_executable() -> str:
+    """Find Code.exe from Windows app discovery or standard installations."""
+    try:
+        return resolve_installed_app_executable("Visual Studio Code", {"Code.exe"})
+    except (FileNotFoundError, RuntimeError, ValueError):
+        pass
+
+    candidates: list[Path] = []
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    program_files = os.environ.get("ProgramFiles")
+    program_files_x86 = os.environ.get("ProgramFiles(x86)")
+    if local_app_data:
+        candidates.append(Path(local_app_data) / "Programs" / "Microsoft VS Code" / "Code.exe")
+    for root in (program_files, program_files_x86):
+        if root:
+            candidates.append(Path(root) / "Microsoft VS Code" / "Code.exe")
+
+    discovered = shutil.which("code.exe") or shutil.which("code")
+    if discovered:
+        candidates.append(Path(discovered))
+
+    for candidate in candidates:
+        if candidate.is_absolute() and candidate.is_file() and candidate.name.casefold() == "code.exe":
+            return str(candidate)
+
+    raise FileNotFoundError(
+        "Visual Studio Code is installed but Dexter could not resolve Code.exe. "
+        "A configured 'vscode' APP_ALIASES override can still be used for a nonstandard install."
+    )
+
+
+def launch_vscode_project(target: str, configured_alias: str = "vscode") -> dict:
+    """Open one validated project with fixed arguments and no model command line."""
+    project = Path(target).expanduser().resolve(strict=False)
+    if not project.exists():
+        raise FileNotFoundError(f"Saved VS Code project no longer exists: {project}")
+    if not project.is_dir() and not (
+        project.is_file() and project.suffix.casefold() == ".code-workspace"
+    ):
+        raise ValueError("Saved VS Code target must be a folder or .code-workspace file.")
+
+    if _has_configured_app_alias(configured_alias):
+        return _launch_configured_app(
+            configured_alias,
+            ["--new-window", str(project)],
+            require_argument_permission=False,
+        )
+    if os.name != "nt":
+        raise RuntimeError("VS Code project launching is currently implemented for Windows only.")
+
+    executable = _find_vscode_executable()
+    command = [executable, "--new-window", str(project)]
+    proc = subprocess.Popen(
+        command,
+        shell=False,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    return {
+        "status": "ok",
+        "operation": "open_vscode_project",
+        "app": "Visual Studio Code",
+        "source": "installed_app",
+        "command": command,
+        "pid": proc.pid,
+        "dispatched": True,
+    }
+
+
 def configured_app_alias_for_executable(exe_path: str | None) -> str | None:
     """Return one configured alias whose executable matches exe_path."""
     if not exe_path:
@@ -235,6 +311,30 @@ def open_allowed_folder(path: str) -> dict:
     return {
         "status": "ok",
         "operation": "open_folder",
+        "path": str(target),
+        "dispatched": True,
+    }
+
+
+def open_trusted_folder(path: str) -> dict:
+    """Open an exact folder selected by trusted persisted-resource code.
+
+    This deliberately does not consult ``ALLOWED_ROOTS``. It is not model-
+    facing and must only receive a previously validated/saved resource target;
+    opening the folder does not grant filesystem-tool access to its contents.
+    """
+    target = Path(path).expanduser().resolve(strict=False)
+    if not target.exists():
+        raise FileNotFoundError(f"Saved resource folder no longer exists: {target}")
+    if not target.is_dir():
+        raise ValueError(f"Saved resource location is not a directory: {target}")
+    if os.name != "nt":
+        raise RuntimeError("Saved resource location opening is currently Windows-only.")
+
+    os.startfile(str(target))
+    return {
+        "status": "ok",
+        "operation": "open_resource_location",
         "path": str(target),
         "dispatched": True,
     }

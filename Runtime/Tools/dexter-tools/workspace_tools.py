@@ -649,3 +649,31 @@ def forget_workspace(query: str) -> dict:
         }
 
     return mutate_state(mutate)
+
+
+def rename_workspace(query: str, new_name: str) -> dict:
+    """Rename one saved workspace layout without recapturing it."""
+    clean_new_name = _validate_name(new_name)
+    now = _utc_now()
+
+    def mutate(state: dict) -> dict:
+        record = _resolve_workspace(query, state)
+        old_name = record["name"]
+        for workspace_id, other in state["workspaces"].items():
+            if workspace_id == record["id"]:
+                continue
+            if _normalize(other["name"]) == _normalize(clean_new_name):
+                raise FileExistsError(f"Saved workspace already exists: {clean_new_name!r}.")
+
+        record["name"] = clean_new_name
+        record["updated_utc"] = now
+        return {
+            "status": "ok",
+            "operation": "rename_workspace",
+            "id": record["id"],
+            "old_name": old_name,
+            "name": clean_new_name,
+            "renamed": _normalize(old_name) != _normalize(clean_new_name),
+        }
+
+    return mutate_state(mutate)

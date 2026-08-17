@@ -57,6 +57,7 @@ from resources import (
     open_saved_resource,
     remember_current_vscode_project,
     remember_resource as remember_resource_record,
+    rename_resource,
     search_resources,
 )
 from screen_tools import capture_screenshot, find_image_on_screen, wait_for_image_on_screen
@@ -73,6 +74,7 @@ from windows_tools import (
 )
 from workspace_tools import (
     forget_workspace,
+    rename_workspace,
     restore_workspace as restore_saved_workspace,
     save_workspace as save_current_workspace,
     search_workspaces,
@@ -301,6 +303,8 @@ def remember_current_project(
         "aliases": resource["aliases"],
         "created": result["created"],
         "updated": result["updated"],
+        "renamed_from": result["renamed_from"],
+        "duplicates_consolidated": result["duplicates_consolidated"],
     }
 
 
@@ -312,8 +316,9 @@ def search_saved(
 ) -> dict:
     """Browse saved resources/layouts or inspect an ambiguous name.
 
-    open_resource, restore_workspace, and forget_saved already resolve names
-    against stored records internally; do not call this first for routine use.
+    open_resource, restore_workspace, rename_saved, and forget_saved already
+    resolve names against stored records internally; do not call this first
+    for routine use.
     """
     if category not in {"all", "resources", "workspaces"}:
         raise ValueError("category must be all, resources, or workspaces.")
@@ -337,14 +342,27 @@ def search_saved(
 
 
 @mcp.tool(annotations=OPEN_WORLD)
-def open_resource(name: str) -> dict:
+def open_resource(
+    name: str,
+    mode: Literal["default", "location"] = "default",
+) -> dict:
     """Open a saved URL, path, or project by a natural name or alias.
 
     Resolution searches all saved resources internally and refuses ambiguity;
     call directly without first guessing a literal target or using search_saved.
+    mode=default opens the resource in its normal app. mode=location opens the
+    exact saved project's/folder's location in Explorer, including a bridge-
+    saved project outside file-tool roots, without granting file access.
     Saved desktop layouts belong to restore_workspace instead.
     """
-    return agent.fields(open_saved_resource(name), "name", "kind", "opened")
+    return agent.fields(
+        open_saved_resource(name, mode),
+        "name",
+        "kind",
+        "mode",
+        "location",
+        "opened",
+    )
 
 
 @mcp.tool(annotations=WRITE_LOCAL)
@@ -396,7 +414,7 @@ def forget_saved(
     category: Literal["resource", "workspace"],
     name: str,
 ) -> dict:
-    """Delete a saved resource/layout after internally resolving its natural name."""
+    """Delete/forget a saved resource or workspace by its natural name."""
     if category == "resource":
         result = forget_resource(name)
     elif category == "workspace":
@@ -404,6 +422,30 @@ def forget_saved(
     else:
         raise ValueError("category must be resource or workspace.")
     return agent.fields(result, "name", "deleted")
+
+
+@mcp.tool(annotations=WRITE_LOCAL)
+def rename_saved(
+    category: Literal["resource", "workspace"],
+    name: str,
+    new_name: str,
+    keep_old_as_alias: bool = False,
+) -> dict:
+    """Rename a saved resource/project or workspace without recreating it.
+
+    Use this when the user corrects a previously saved name. For the currently
+    active VS Code project, remember_current_project(new name) is even simpler
+    and automatically consolidates duplicate names for that same target.
+    """
+    if category == "resource":
+        result = rename_resource(name, new_name, keep_old_as_alias)
+    elif category == "workspace":
+        if keep_old_as_alias:
+            raise ValueError("Workspace aliases are not supported.")
+        result = rename_workspace(name, new_name)
+    else:
+        raise ValueError("category must be resource or workspace.")
+    return agent.fields(result, "old_name", "name", "renamed")
 
 
 # Launching ------------------------------------------------------------------

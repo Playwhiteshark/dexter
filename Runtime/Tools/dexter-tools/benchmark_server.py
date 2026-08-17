@@ -105,7 +105,10 @@ def _simulate(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
     if tool == "open_app":
         return {"pid": 4242, "process_alive_after_launch": True}
     if tool in {"open_file", "open_folder", "open_url", "open_resource"}:
-        return {"opened": True}
+        return {
+            "opened": True,
+            "mode": arguments.get("mode", "default"),
+        }
     if tool == "remember_current_project":
         return {
             "name": arguments.get("name") or "Current Project",
@@ -115,6 +118,14 @@ def _simulate(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
             "created": True,
             "updated": False,
         }
+    if tool == "rename_saved":
+        return {
+            "old_name": arguments.get("name"),
+            "name": arguments.get("new_name"),
+            "renamed": True,
+        }
+    if tool == "forget_saved":
+        return {"name": arguments.get("name"), "deleted": True}
     if tool == "restore_workspace":
         return {
             "name": arguments.get("name"),

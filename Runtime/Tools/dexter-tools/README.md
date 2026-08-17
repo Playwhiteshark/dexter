@@ -79,13 +79,15 @@ The model-facing catalog now includes a small persistent operational-memory laye
 
 - `remember_resource(name, kind, target, aliases=None, overwrite=False)` stores a named URL, folder, file, VS Code workspace/folder, Visual Studio solution, or Unity project.
 - `remember_current_project(name=None, aliases=None, overwrite=False)` reads the active or most-recently-focused VS Code bridge session, validates its real workspace/folders, and remembers it without asking the model to guess a path.
+- Repeating `remember_current_project` with a different name corrects the existing record for that same project and consolidates duplicate names left by older versions.
+- `rename_saved(category, name, new_name, keep_old_as_alias=False)` renames any saved resource/project or workspace without recreating it.
 - `search_saved(...)` browses saved resources/workspaces or helps explain a genuinely ambiguous name; action tools do not need a preliminary search.
-- `open_resource(name)` resolves natural phrases against all real saved resource names and aliases internally, then opens the unique match through the existing safe launch boundaries.
+- `open_resource(name, mode="default")` resolves natural phrases against saved names/aliases and opens the unique match. `mode="location"` reveals that exact saved project/folder in Explorer, even when a bridge-saved project is outside file-tool roots; it does not grant read/write access.
 - `save_workspace(name)` captures the current user-facing top-level window layout.
 - `restore_workspace(name)` resolves the requested name against saved layouts before acting, repositions matching open windows, and can relaunch missing configured apps or saved development resources when a safe launch hint exists.
 - `forget_saved(category, name)` removes a stored resource/workspace.
 
-Generic request words such as `open`, `my`, `project`, and `workspace` do not have to be part of the stored name. For example, a project saved as `FriendBox` resolves from “open my FriendBox VS Code project,” and a layout saved as `AI` resolves from “restore my AI workspace.” Exact names and aliases win; partial matches must still be unique, so Dexter reports ambiguity instead of guessing.
+Generic request words such as `open`, `my`, `project`, and `workspace` do not have to be part of the stored name. Speech-to-text compound spacing is normalized too, so a project saved as `FriendBox` resolves from “open my friend box VS Code project,” while a layout saved as `AI` resolves from “restore my AI workspace.” Exact names and aliases win; partial matches must still be unique, so Dexter reports ambiguity instead of guessing.
 
 Operational memory is stored outside the repository by default at `%LOCALAPPDATA%\Dexter\state\computer_memory.json`. This is intentionally separate from conversation history and future biographical/profile memory. `STATE_DIR` may be overridden in ignored `local_config.py`.
 
@@ -105,9 +107,9 @@ If several bridge sessions exist and focus history cannot identify one uniquely,
 
 Discovered apps intentionally do not accept model-provided command-line arguments. Apps requiring fixed trusted arguments or unusual launch targets should still use `APP_ALIASES` or a purpose-built internal provider.
 
-### Development-project launch aliases
+### Development-project launching
 
-Saved VS Code, Visual Studio, and Unity projects use configured app aliases. By default Dexter expects aliases named `vscode`, `visual studio`, and `unity`. Override those names with `RESOURCE_APP_ALIASES` in `local_config.py` if needed. The project path is validated first and then passed through fixed app-specific arguments (`--new-window`, solution path, or `-projectPath`); arbitrary model-provided command arguments are not exposed.
+Saved VS Code projects resolve Visual Studio Code through Windows' installed-app/Start Menu data and standard installation locations, then receive only Dexter's fixed `--new-window <validated project>` arguments. No manual alias is required for a normal VS Code installation. A configured `vscode` alias remains an optional override for a nonstandard install. Visual Studio and Unity projects still use the configured `visual studio` and `unity` aliases. Project paths are validated first; arbitrary model-provided command arguments are not exposed.
 
 ### Workspace behavior and current limits
 

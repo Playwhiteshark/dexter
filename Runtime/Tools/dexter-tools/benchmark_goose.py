@@ -94,12 +94,40 @@ def _fixtures(root: Path) -> list[Case]:
             forbidden_calls=("remember_resource", "search_saved"),
         ),
         Case(
+            "correct_saved_project_name",
+            "I misspoke earlier. Rename the saved resource called 'Hold on, I forgot' "
+            "to 'FriendBox'. Do not create another saved resource.",
+            (
+                ExpectedCall(
+                    "rename_saved",
+                    {
+                        "category": "resource",
+                        "name": "Hold on, I forgot",
+                        "new_name": "FriendBox",
+                    },
+                ),
+            ),
+            forbidden_calls=("remember_resource",),
+        ),
+        Case(
             "open_saved_project_directly",
             "Open the previously saved project whose name is exactly FriendBox. "
             "Use the action that resolves saved resource names internally; do not "
             "call search_saved first.",
             (ExpectedCall("open_resource", {"name": "FriendBox"}),),
             forbidden_calls=("search_saved",),
+        ),
+        Case(
+            "open_saved_project_location",
+            "Open my saved FriendBox project's folder in File Explorer. Use the "
+            "saved resource itself; do not try an arbitrary folder path.",
+            (
+                ExpectedCall(
+                    "open_resource",
+                    {"name": "FriendBox", "mode": "location"},
+                ),
+            ),
+            forbidden_calls=("open_folder", "search_saved"),
         ),
         Case(
             "restore_workspace_directly",

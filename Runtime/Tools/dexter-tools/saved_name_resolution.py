@@ -60,12 +60,17 @@ def _identity_score(query: str, identity: str, identity_priority: int) -> tuple[
         # stored "AI" when both exist, while either one works independently.
         return (1, abs(len(query_tokens) - len(identity_tokens)), identity_priority)
 
+    # Speech-to-text commonly separates product/project compounds: a saved
+    # ``FriendBox`` should resolve from spoken ``friend box`` (and vice versa).
+    if "".join(query_core) == "".join(identity_core):
+        return (2, abs(len(query_tokens) - len(identity_tokens)), identity_priority)
+
     query_set = set(query_core)
     identity_set = set(identity_core)
     if query_set and identity_set and (
         query_set.issubset(identity_set) or identity_set.issubset(query_set)
     ):
-        return (2, abs(len(query_set) - len(identity_set)), identity_priority)
+        return (3, abs(len(query_set) - len(identity_set)), identity_priority)
 
     # Retain the useful partial-name behavior for inputs such as "friend" ->
     # "FriendBox", but only after exact and token-aware matches have failed.
@@ -74,7 +79,7 @@ def _identity_score(query: str, identity: str, identity_priority: int) -> tuple[
         or identity_normalized in query_normalized
     ):
         return (
-            3,
+            4,
             abs(len(query_normalized) - len(identity_normalized)),
             identity_priority,
         )

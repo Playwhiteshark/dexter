@@ -491,6 +491,41 @@ def system_suite() -> list[bool]:
             else:
                 launcher.APP_ALIASES[alias] = previous_alias
 
+    def vscode_project_executable_uses_installed_app_discovery():
+        expected = str((root / "Code.exe").resolve())
+        with patch(
+            "launcher.resolve_installed_app_executable",
+            return_value=expected,
+        ) as resolve:
+            observed = launcher._find_vscode_executable()
+        check(observed == expected, f"VS Code executable discovery changed: {observed}")
+        resolve.assert_called_once_with("Visual Studio Code", {"Code.exe"})
+
+        shortcut = root / "Visual Studio Code.lnk"
+        executable = root / "Code.exe"
+        shortcut.write_bytes(b"shortcut fixture")
+        executable.write_bytes(b"executable fixture")
+        candidate = app_discovery.AppCandidate(
+            name="Visual Studio Code",
+            source="start_menu_shortcut",
+            launch_target=str(shortcut),
+        )
+        completed = type(
+            "Completed",
+            (),
+            {"returncode": 0, "stdout": str(executable), "stderr": ""},
+        )()
+        with (
+            patch("app_discovery.resolve_installed_app", return_value=candidate),
+            patch("app_discovery.subprocess.run", return_value=completed) as run,
+        ):
+            resolved = app_discovery.resolve_installed_app_executable(
+                "Visual Studio Code",
+                {"Code.exe"},
+            )
+        check(resolved == str(executable), f"shortcut did not resolve to Code.exe: {resolved}")
+        check(str(shortcut) in run.call_args.args[0], "fixed shortcut resolver did not receive discovered shortcut")
+
     def process_wrapper():
         result = process_tools.process_running(pid=os.getpid())
         check(result["running"], "current test process was not found")
@@ -659,6 +694,7 @@ def system_suite() -> list[bool]:
         run_case("System: launcher policy guards", launcher_policy_guards),
         run_case("System: installed app name matching", installed_app_name_matching),
         run_case("System: configured app alias precedes discovery", configured_alias_precedes_discovery),
+        run_case("System: VS Code project uses installed-app discovery", vscode_project_executable_uses_installed_app_discovery),
         run_case("System: process wrapper", process_wrapper),
         run_case("System: optional Windows .exe process suffix", process_name_exe_suffix_optional),
         run_case("System: DWM-visible frame geometry translation", visible_frame_geometry_translation),
@@ -735,11 +771,11 @@ def memory_suite() -> list[bool]:
         # Reuse records created by the previous case. Opening a saved project
         # must use fixed, validated app-specific arguments rather than exposing
         # arbitrary command-line execution to the model.
-        with patch("resources.launch_app_with_trusted_arguments") as launch:
+        with patch("resources.launch_vscode_project") as launch:
             resources.open_saved_resource("Code project")
             launch.assert_called_once_with(
-                "vscode",
-                ["--new-window", str((root / "CodeProject").resolve())],
+                str((root / "CodeProject").resolve()),
+                configured_alias="vscode",
             )
 
         with patch("resources.launch_app_with_trusted_arguments") as launch:
@@ -761,14 +797,14 @@ def memory_suite() -> list[bool]:
         friendbox.mkdir()
         resources.remember_resource("FriendBox", "vscode", str(friendbox))
 
-        with patch("resources.launch_app_with_trusted_arguments") as launch:
+        with patch("resources.launch_vscode_project") as launch:
             opened = resources.open_saved_resource(
-                "open my FriendBox VS Code project"
+                "open my friend box VS Code project"
             )
         check(opened["name"] == "FriendBox", f"natural project name resolved incorrectly: {opened}")
         launch.assert_called_once_with(
-            "vscode",
-            ["--new-window", str(friendbox.resolve())],
+            str(friendbox.resolve()),
+            configured_alias="vscode",
         )
 
         def add_workspace(state):
@@ -823,7 +859,7 @@ def memory_suite() -> list[bool]:
 
             session = {
                 "session_id": "dexter-live",
-                "workspace_name": "Dexter",
+                "workspace_name": "Jarvis",
                 "workspace_file": None,
                 "workspace_folders": [str(project)],
                 "active_file": str(project / "README.md"),
@@ -831,6 +867,7 @@ def memory_suite() -> list[bool]:
             }
             with patch("resources.current_vscode_session", return_value=session):
                 saved = resources.remember_current_vscode_project(
+                    name="Dexter",
                     aliases=["local assistant"]
                 )
 
@@ -839,14 +876,77 @@ def memory_suite() -> list[bool]:
             check(record["target"] == str(project.resolve()), f"project target was guessed: {record}")
             check("local assistant" in record["aliases"], f"explicit alias was lost: {record}")
 
-            with patch("resources.launch_app_with_trusted_arguments") as launch:
+            with patch("resources.launch_vscode_project") as launch:
                 opened = resources.open_saved_resource("the Dexter project")
             check(opened["name"] == "Dexter", f"remembered current project did not reopen: {opened}")
             launch.assert_called_once_with(
-                "vscode",
-                ["--new-window", str(project.resolve())],
+                str(project.resolve()),
+                configured_alias="vscode",
             )
-            resources.forget_resource("Dexter VS Code project")
+
+            with patch("resources.open_trusted_folder") as open_location:
+                location = resources.open_saved_resource(
+                    "the Dexter project",
+                    mode="location",
+                )
+            check(location["location"] == str(project.resolve()), f"wrong project location: {location}")
+            open_location.assert_called_once_with(str(project.resolve()))
+
+            def add_stale_duplicate(state):
+                existing = next(
+                    item
+                    for item in state["resources"].values()
+                    if item["kind"] == "vscode" and item["target"] == str(project.resolve())
+                )
+                state["resources"]["res_stale_transcript"] = {
+                    **existing,
+                    "id": "res_stale_transcript",
+                    "name": "Hold on, I forgot",
+                }
+
+            state_store.mutate_state(add_stale_duplicate)
+            with patch("resources.current_vscode_session", return_value=session):
+                corrected = resources.remember_current_vscode_project("FriendBox")
+            check(
+                corrected["renamed_from"] == ["Dexter", "Hold on, I forgot"],
+                f"old names were not reported during correction: {corrected}",
+            )
+            check(corrected["duplicates_consolidated"] == 1, f"duplicate was not repaired: {corrected}")
+            records = [
+                item
+                for item in resources.search_resources()["resources"]
+                if item["kind"] == "vscode" and item["target"] == str(project.resolve())
+            ]
+            check(len(records) == 1 and records[0]["name"] == "FriendBox", f"correction left duplicates: {records}")
+            check("Jarvis" in records[0]["aliases"], f"real workspace alias was lost: {records[0]}")
+            check("Hold on, I forgot" not in records[0]["aliases"], f"bad transcript became an alias: {records[0]}")
+            resources.forget_resource("FriendBox VS Code project")
+
+    def saved_records_can_be_renamed_and_deleted():
+        resources.remember_resource("Wrong label", "url", "https://example.com/project")
+        renamed = resources.rename_resource("Wrong label", "Correct label")
+        check(renamed["renamed"] and renamed["old_name"] == "Wrong label", f"resource rename failed: {renamed}")
+        check(resources.search_resources("Correct label")["count"] == 1, "renamed resource was not searchable")
+        deleted = resources.forget_resource("Correct label")
+        check(deleted["deleted"], f"renamed resource could not be deleted: {deleted}")
+
+        def add_workspace(state):
+            state["workspaces"]["ws_wrong"] = {
+                "id": "ws_wrong",
+                "name": "Wrong workspace",
+                "windows": [],
+                "created_utc": "2026-01-01T00:00:00+00:00",
+                "updated_utc": "2026-01-01T00:00:00+00:00",
+            }
+
+        state_store.mutate_state(add_workspace)
+        workspace_renamed = workspace_tools.rename_workspace(
+            "Wrong workspace",
+            "Correct workspace",
+        )
+        check(workspace_renamed["renamed"], f"workspace rename failed: {workspace_renamed}")
+        workspace_deleted = workspace_tools.forget_workspace("Correct workspace")
+        check(workspace_deleted["deleted"], f"renamed workspace could not be deleted: {workspace_deleted}")
 
     def current_vscode_project_uses_last_real_focus():
         older = {
@@ -1906,6 +2006,7 @@ def memory_suite() -> list[bool]:
         run_case("Memory: typed project open dispatch", typed_project_open_dispatch),
         run_case("Memory: natural names resolve inside action tools", natural_saved_name_resolution_is_internal),
         run_case("Memory: remember active VS Code project", remember_current_vscode_project_from_bridge),
+        run_case("Memory: saved records support rename + deletion", saved_records_can_be_renamed_and_deleted),
         run_case("Memory: active VS Code project uses real focus history", current_vscode_project_uses_last_real_focus),
         run_case("Workspace: persist per-app internal state", workspace_app_state_capture_is_persisted),
         run_case("Workspace: restore app state before geometry", workspace_app_state_restore_runs_before_geometry),
@@ -2050,12 +2151,13 @@ def mcp_suite() -> list[bool]:
         manager = server.mcp._tool_manager
         tools = manager.list_tools()
         names = [tool.name for tool in tools]
-        check(len(names) == 48, f"expected 48 model-facing tools, got {len(names)}")
+        check(len(names) == 49, f"expected 49 model-facing tools, got {len(names)}")
         check("read_image" in names, "read_image not registered")
         check("write_file" in names, "write_file not registered")
         for expected in (
             "remember_resource",
             "remember_current_project",
+            "rename_saved",
             "search_saved",
             "open_resource",
             "save_workspace",
@@ -2108,6 +2210,8 @@ def mcp_suite() -> list[bool]:
                 },
                 "created": True,
                 "updated": False,
+                "renamed_from": [],
+                "duplicates_consolidated": 0,
             },
         ) as mocked:
             result = server.remember_current_project(
@@ -2116,6 +2220,45 @@ def mcp_suite() -> list[bool]:
             )
         check(result["name"] == "FriendBox" and result["created"], f"wrong project memory result: {result}")
         mocked.assert_called_once_with("FriendBox", ["friend terminal"], False)
+
+    def rename_saved_wrapper_contract():
+        with patch(
+            "server.rename_resource",
+            return_value={
+                "old_name": "Hold on, I forgot",
+                "name": "FriendBox",
+                "renamed": True,
+            },
+        ) as mocked:
+            result = server.rename_saved(
+                "resource",
+                "Hold on, I forgot",
+                "FriendBox",
+            )
+        check(
+            result == {
+                "old_name": "Hold on, I forgot",
+                "name": "FriendBox",
+                "renamed": True,
+            },
+            f"wrong rename result: {result}",
+        )
+        mocked.assert_called_once_with("Hold on, I forgot", "FriendBox", False)
+
+    def open_saved_location_wrapper_contract():
+        with patch(
+            "server.open_saved_resource",
+            return_value={
+                "name": "FriendBox",
+                "kind": "vscode",
+                "mode": "location",
+                "location": r"C:\Work\FriendBox",
+                "opened": True,
+            },
+        ) as mocked:
+            result = server.open_resource("friend box project", "location")
+        check(result["mode"] == "location" and result["opened"], f"wrong saved-location result: {result}")
+        mocked.assert_called_once_with("friend box project", "location")
 
     def close_named_app_wrapper_contract():
         with patch(
@@ -2367,6 +2510,8 @@ def mcp_suite() -> list[bool]:
     return [
         run_case("MCP: registration + standard annotations", registration_and_annotations),
         run_case("MCP: remember-current-project wrapper", remember_current_project_wrapper_contract),
+        run_case("MCP: rename-saved wrapper", rename_saved_wrapper_contract),
+        run_case("MCP: open saved project location", open_saved_location_wrapper_contract),
         run_case("MCP: named-app close wrapper", close_named_app_wrapper_contract),
         run_case("MCP: active-desktop close-all wrapper", close_all_wrapper_contract),
         run_case("MCP: close-all filters inactive desktops", close_all_filters_other_virtual_desktops),
