@@ -78,15 +78,26 @@ The Host owns the approval policy above Goose's `smart_approve` requests. Every 
 The model-facing catalog now includes a small persistent operational-memory layer:
 
 - `remember_resource(name, kind, target, aliases=None, overwrite=False)` stores a named URL, folder, file, VS Code workspace/folder, Visual Studio solution, or Unity project.
-- `search_saved(...)` retrieves only relevant saved resources/workspaces on demand.
-- `open_resource(name)` resolves a saved item internally and opens it through the existing safe launch boundaries.
+- `remember_current_project(name=None, aliases=None, overwrite=False)` reads the active or most-recently-focused VS Code bridge session, validates its real workspace/folders, and remembers it without asking the model to guess a path.
+- `search_saved(...)` browses saved resources/workspaces or helps explain a genuinely ambiguous name; action tools do not need a preliminary search.
+- `open_resource(name)` resolves natural phrases against all real saved resource names and aliases internally, then opens the unique match through the existing safe launch boundaries.
 - `save_workspace(name)` captures the current user-facing top-level window layout.
-- `restore_workspace(name)` repositions matching open windows and can relaunch missing configured apps or saved development resources when a safe launch hint exists.
+- `restore_workspace(name)` resolves the requested name against saved layouts before acting, repositions matching open windows, and can relaunch missing configured apps or saved development resources when a safe launch hint exists.
 - `forget_saved(category, name)` removes a stored resource/workspace.
+
+Generic request words such as `open`, `my`, `project`, and `workspace` do not have to be part of the stored name. For example, a project saved as `FriendBox` resolves from “open my FriendBox VS Code project,” and a layout saved as `AI` resolves from “restore my AI workspace.” Exact names and aliases win; partial matches must still be unique, so Dexter reports ambiguity instead of guessing.
 
 Operational memory is stored outside the repository by default at `%LOCALAPPDATA%\Dexter\state\computer_memory.json`. This is intentionally separate from conversation history and future biographical/profile memory. `STATE_DIR` may be overridden in ignored `local_config.py`.
 
 Resource paths remain subject to `ALLOWED_ROOTS`. Saving a resource does not create a new filesystem permission boundary.
+
+`remember_current_project` requires the local `Dexter Workspace State` VS Code integration. Version 0.1.2 records both current focus and the last real editor focus, because Dexter's overlay may own focus by the time a typed request is submitted. Install/update it from the repository root, then reload each VS Code window:
+
+```powershell
+.\Runtime\Integrations\dexter-vscode-workspace-state\install.ps1
+```
+
+If several bridge sessions exist and focus history cannot identify one uniquely, Dexter asks the user to focus the intended project instead of choosing whichever session wrote most recently.
 
 ### Installed app discovery
 
@@ -112,7 +123,7 @@ A genuinely closed window has no current HWND, so workspace restore now uses an 
 
 Provider-aware startup waiting is designed for splash/launcher applications. For known desktop applications, a newly appeared fixed-size/non-resizable card is treated as transient; Dexter keeps waiting for a stable resizable main window instead of moving/resizing the splash. If the real window does not appear before the timeout, the workspace result reports it as `pending` and leaves the transient window alone. The default launch timeout is 20 seconds and callers may request up to 120 seconds.
 
-This stage does not yet snapshot application-internal state. Browser tabs, Explorer folder identity, VS Code project/editor state without an already saved resource, Terminal tabs/profiles/directories, unsaved documents, and arbitrary application command lines are not inferred from window titles. Those belong in app-specific capture/restore providers rather than the model prompt or generic window layer.
+This stage does not yet snapshot all application-internal state. Browser tabs, Explorer folder identity, Terminal tabs/profiles/directories, unsaved documents, and arbitrary application command lines are not inferred from window titles. VS Code project identity and native editor-session restore are handled by the local bridge; other app internals belong in app-specific capture/restore providers rather than the model prompt or generic window layer.
 
 Virtual-desktop orchestration is deliberately not implemented in this version. DWM-cloaked windows are omitted from capture. Bulk close uses the documented `IVirtualDesktopManager::IsWindowOnCurrentVirtualDesktop` membership check so windows on other desktops are left alone, but Dexter does not enumerate, name, create, switch, or assign Windows virtual desktops.
 

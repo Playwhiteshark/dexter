@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,7 +16,9 @@ from launcher import (
     open_allowed_folder,
     open_http_url,
 )
+from saved_name_resolution import rank_named_records, resolve_named_record
 from state_store import load_state, mutate_state
+from vscode_state import GENERATED, current_vscode_session, vscode_open_target
 
 ResourceKind = Literal["url", "folder", "file", "vscode", "visual_studio", "unity"]
 RESOURCE_KINDS = {"url", "folder", "file", "vscode", "visual_studio", "unity"}
@@ -107,56 +108,20 @@ def _all_identity_keys(record: dict) -> set[str]:
     return {_normalize(record["name"]), *(_normalize(v) for v in record.get("aliases", []))}
 
 
-def _record_matches_query(record: dict, query: str) -> tuple[int, str] | None:
-    q = _normalize(query)
-    name = _normalize(record["name"])
-    aliases = [_normalize(alias) for alias in record.get("aliases", [])]
-
-    if q == name:
-        return 0, name
-    if q in aliases:
-        return 1, name
-    if q and q in name:
-        return 2, name
-    if q and any(q in alias for alias in aliases):
-        return 3, name
-    return None
-
-
 def _resolve_resource_record(query: str, state: dict | None = None) -> dict:
     clean = _validate_label(query, "resource name")
     records = list((state or load_state())["resources"].values())
-    ranked: list[tuple[int, str, dict]] = []
-    for record in records:
-        match = _record_matches_query(record, clean)
-        if match is not None:
-            ranked.append((match[0], match[1], record))
-
-    if not ranked:
-        raise LookupError(f"No saved resource matches {clean!r}.")
-
-    ranked.sort(key=lambda item: (item[0], item[1]))
-    best_score = ranked[0][0]
-    best = [record for score, _name, record in ranked if score == best_score]
-    if len(best) != 1:
-        names = ", ".join(sorted(record["name"] for record in best))
-        raise LookupError(f"Resource name is ambiguous: {clean!r}. Matches: {names}")
-    return best[0]
+    return resolve_named_record(clean, records, record_label="resource")
 
 
-def remember_resource(
-    name: str,
-    kind: ResourceKind,
-    target: str,
-    aliases: list[str] | None = None,
-    overwrite: bool = False,
+def _remember_validated_resource(
+    clean_name: str,
+    clean_kind: str,
+    clean_target: str,
+    clean_aliases: list[str],
+    overwrite: bool,
 ) -> dict:
-    clean_name = _validate_label(name, "name")
-    clean_kind = str(kind).strip().casefold()
-    if clean_kind not in RESOURCE_KINDS:
-        raise ValueError(f"Unsupported resource kind: {kind!r}")
-    clean_aliases = _validate_aliases(aliases)
-    clean_target = _validate_target(clean_kind, target)
+    """Persist a resource after its type-specific target has been verified."""
     requested_keys = {_normalize(clean_name), *(_normalize(a) for a in clean_aliases)}
     if len(requested_keys) != 1 + len(clean_aliases):
         raise ValueError("Resource name and aliases must be distinct.")
@@ -207,6 +172,110 @@ def remember_resource(
     return mutate_state(mutate)
 
 
+def remember_resource(
+    name: str,
+    kind: ResourceKind,
+    target: str,
+    aliases: list[str] | None = None,
+    overwrite: bool = False,
+) -> dict:
+    clean_name = _validate_label(name, "name")
+    clean_kind = str(kind).strip().casefold()
+    if clean_kind not in RESOURCE_KINDS:
+        raise ValueError(f"Unsupported resource kind: {kind!r}")
+    clean_aliases = _validate_aliases(aliases)
+    clean_target = _validate_target(clean_kind, target)
+    return _remember_validated_resource(
+        clean_name,
+        clean_kind,
+        clean_target,
+        clean_aliases,
+        overwrite,
+    )
+
+
+def remember_current_vscode_project(
+    name: str | None = None,
+    aliases: list[str] | None = None,
+    overwrite: bool = False,
+) -> dict:
+    """Remember the focused VS Code project using bridge-grounded identity."""
+    session = current_vscode_session()
+    folders = [
+        str(folder).strip()
+        for folder in session.get("workspace_folders") or []
+        if isinstance(folder, str) and folder.strip()
+    ]
+    for folder in folders:
+        resolved_folder = resolve_allowed_path(folder)
+        if not resolved_folder.is_dir():
+            raise ValueError(f"VS Code workspace folder is not a directory: {resolved_folder}")
+
+    target = vscode_open_target(session)
+    if not target:
+        raise LookupError(
+            "The active VS Code window has no folder or saved workspace file to remember."
+        )
+    candidate = Path(target).expanduser().resolve(strict=False)
+    generated_root = GENERATED.expanduser().resolve(strict=False)
+    if candidate.is_relative_to(generated_root):
+        if not candidate.is_file():
+            raise FileNotFoundError(f"Generated VS Code workspace was not created: {candidate}")
+        clean_target = str(candidate)
+    else:
+        clean_target = _validate_target("vscode", str(candidate))
+
+    workspace_name = str(session.get("workspace_name") or "").strip()
+    inferred_names = [
+        workspace_name,
+        Path(clean_target).stem,
+        *(Path(folder).name for folder in folders),
+    ]
+    if name is None:
+        clean_name = next(
+            (
+                _validate_label(value, "name")
+                for value in inferred_names
+                if value and not value.casefold().startswith("dexter-")
+            ),
+            None,
+        )
+        if clean_name is None:
+            raise ValueError(
+                "Could not infer a stable project name; provide the name to remember."
+            )
+    else:
+        clean_name = _validate_label(name, "name")
+
+    alias_candidates = [*(aliases or []), *inferred_names]
+    clean_aliases: list[str] = []
+    seen = {_normalize(clean_name)}
+    for value in alias_candidates:
+        if not isinstance(value, str) or not value.strip():
+            continue
+        clean = _validate_label(value, "alias")
+        key = _normalize(clean)
+        if key not in seen and not key.startswith("dexter-"):
+            clean_aliases.append(clean)
+            seen.add(key)
+    clean_aliases = _validate_aliases(clean_aliases)
+
+    result = _remember_validated_resource(
+        clean_name,
+        "vscode",
+        clean_target,
+        clean_aliases,
+        overwrite,
+    )
+    result["source"] = {
+        "session_id": session.get("session_id"),
+        "workspace_name": workspace_name or None,
+        "workspace_folders": folders,
+        "active_file": session.get("active_file"),
+    }
+    return result
+
+
 def search_resources(
     query: str | None = None,
     kind: ResourceKind | None = None,
@@ -219,27 +288,23 @@ def search_resources(
 
     state = load_state()
     records = list(state["resources"].values())
-    ranked: list[tuple[int, str, dict]] = []
-    for record in records:
-        if kind is not None and record["kind"] != str(kind).casefold():
-            continue
-        if query:
-            match = _record_matches_query(record, query)
-            if match is None:
-                continue
-            score = match[0]
-        else:
-            score = 0
-        ranked.append((score, _normalize(record["name"]), record))
-
-    ranked.sort(key=lambda item: (item[0], item[1]))
-    selected = [dict(item[2]) for item in ranked[:max_results]]
+    records = [
+        record
+        for record in records
+        if kind is None or record["kind"] == str(kind).casefold()
+    ]
+    if query:
+        ranked = rank_named_records(query, records)
+        ordered = [record for _score, record in ranked]
+    else:
+        ordered = sorted(records, key=lambda record: _normalize(record["name"]))
+    selected = [dict(item) for item in ordered[:max_results]]
     return {
         "status": "ok",
         "operation": "search_resources",
         "resources": selected,
         "count": len(selected),
-        "truncated": len(ranked) > max_results,
+        "truncated": len(ordered) > max_results,
     }
 
 

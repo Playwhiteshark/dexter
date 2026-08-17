@@ -42,13 +42,20 @@ def main() -> int:
         print(f"  - {item.get('browser_kind')} session={item.get('session_id')} pid={item.get('pid')}")
     print(f"Active VS Code bridge sessions: {len(vscode_sessions)}")
     for item in vscode_sessions:
-        print(f"  - {item.get('workspace_name') or '<no workspace>'} session={item.get('session_id')} pid={item.get('pid')}")
+        print(
+            f"  - {item.get('workspace_name') or '<no workspace>'} "
+            f"session={item.get('session_id')} pid={item.get('pid')} "
+            f"focused={bool(item.get('focused'))} last_focused={item.get('last_focused_unix') or 0}"
+        )
 
     ready = bool(browser_sessions) and bool(vscode_sessions)
     if not browser_sessions:
         print("Browser bridge is not active. Load/reload the Dexter Workspace Bridge extension in the browser.")
     if not vscode_sessions:
-        print("VS Code bridge is not active. Restart or reload the VS Code window after installing v6.")
+        print(
+            "VS Code bridge is not active. Install/update Dexter Workspace State, "
+            "then restart or reload the VS Code window."
+        )
     return 0 if ready else 1
 
 

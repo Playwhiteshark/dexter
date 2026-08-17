@@ -55,6 +55,7 @@ from process_tools import list_processes_info, process_running
 from resources import (
     forget_resource,
     open_saved_resource,
+    remember_current_vscode_project,
     remember_resource as remember_resource_record,
     search_resources,
 )
@@ -278,13 +279,40 @@ def remember_resource(
     }
 
 
+@mcp.tool(annotations=WRITE_LOCAL)
+def remember_current_project(
+    name: str | None = None,
+    aliases: list[str] | None = None,
+    overwrite: bool = False,
+) -> dict:
+    """Remember the active VS Code project without guessing its path.
+
+    Uses the VS Code bridge to identify the focused/most-recently-focused
+    folder or workspace. The name may be omitted when VS Code provides one.
+    """
+    result = remember_current_vscode_project(name, aliases, overwrite)
+    resource = result["resource"]
+    return {
+        "name": resource["name"],
+        "kind": resource["kind"],
+        "target": resource["target"],
+        "aliases": resource["aliases"],
+        "created": result["created"],
+        "updated": result["updated"],
+    }
+
+
 @mcp.tool(annotations=READ_ONLY_LOCAL)
 def search_saved(
     query: str | None = None,
     category: Literal["all", "resources", "workspaces"] = "all",
     max_results: int = DEFAULT_SAVED_SEARCH_RESULTS,
 ) -> dict:
-    """Search Dexter's saved operational resources and workspace layouts by name."""
+    """Browse saved resources/layouts or inspect an ambiguous name.
+
+    open_resource, restore_workspace, and forget_saved already resolve names
+    against stored records internally; do not call this first for routine use.
+    """
     if category not in {"all", "resources", "workspaces"}:
         raise ValueError("category must be all, resources, or workspaces.")
 
@@ -308,7 +336,12 @@ def search_saved(
 
 @mcp.tool(annotations=OPEN_WORLD)
 def open_resource(name: str) -> dict:
-    """Open one previously saved resource by its name or alias."""
+    """Open a saved URL, path, or project by a natural name or alias.
+
+    Resolution searches all saved resources internally and refuses ambiguity;
+    call directly without first guessing a literal target or using search_saved.
+    Saved desktop layouts belong to restore_workspace instead.
+    """
     return agent.fields(open_saved_resource(name), "name", "kind", "opened")
 
 
@@ -333,7 +366,12 @@ def restore_workspace(
     launch_missing: bool = True,
     timeout_seconds: float = DEFAULT_WORKSPACE_LAUNCH_TIMEOUT_SECONDS,
 ) -> dict:
-    """Restore a saved Windows layout and its supported per-app state; safely relaunch known resources/apps when possible."""
+    """Restore a saved Windows layout by natural name.
+
+    The tool searches saved workspace names internally, ignores generic words
+    such as "workspace", and refuses ambiguous matches. Do not call
+    search_saved first. Supported app state/resources are relaunched safely.
+    """
     return agent.fields(
         restore_saved_workspace(name, launch_missing, timeout_seconds),
         "name",
@@ -356,7 +394,7 @@ def forget_saved(
     category: Literal["resource", "workspace"],
     name: str,
 ) -> dict:
-    """Delete one saved operational resource or workspace layout from Dexter's persistent memory."""
+    """Delete a saved resource/layout after internally resolving its natural name."""
     if category == "resource":
         result = forget_resource(name)
     elif category == "workspace":

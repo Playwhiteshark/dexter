@@ -54,6 +54,7 @@ AUTO_APPROVED_TOOLS = frozenset(
         "rename_file",
         "delete_file",
         "remember_resource",
+        "remember_current_project",
         "search_saved",
         "open_resource",
         "save_workspace",

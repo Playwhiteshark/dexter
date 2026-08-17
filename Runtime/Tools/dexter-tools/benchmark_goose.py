@@ -47,6 +47,7 @@ class Case:
     prompt: str
     expected_calls: tuple[ExpectedCall, ...]
     expected_text: str | None = None
+    forbidden_calls: tuple[str, ...] = ()
 
 
 def _root() -> Path:
@@ -83,6 +84,29 @@ def _fixtures(root: Path) -> list[Case]:
             "several Code.exe processes. Use the exact process name Code.exe and do "
             "not close any other application.",
             (ExpectedCall("close_all_windows_for_app", {"process_name": "Code.exe"}),),
+            forbidden_calls=("close_every_app_on_active_desktop",),
+        ),
+        Case(
+            "remember_current_project",
+            "Remember the currently active VS Code project as FriendBox. Do not "
+            "guess or ask for its path; use the tool that reads the VS Code bridge.",
+            (ExpectedCall("remember_current_project", {"name": "FriendBox"}),),
+            forbidden_calls=("remember_resource", "search_saved"),
+        ),
+        Case(
+            "open_saved_project_directly",
+            "Open the previously saved project whose name is exactly FriendBox. "
+            "Use the action that resolves saved resource names internally; do not "
+            "call search_saved first.",
+            (ExpectedCall("open_resource", {"name": "FriendBox"}),),
+            forbidden_calls=("search_saved",),
+        ),
+        Case(
+            "restore_workspace_directly",
+            "Restore my saved AI workspace. Call restore_workspace directly with "
+            "the name 'AI workspace'; do not call search_saved first.",
+            (ExpectedCall("restore_workspace", {"name": "AI workspace"}),),
+            forbidden_calls=("search_saved",),
         ),
         Case(
             "webp_vision",
@@ -191,6 +215,8 @@ def _calls_match(trace: list[dict[str, Any]], case: Case) -> tuple[bool, list[di
     # normal result (the corrupt-image case is intentional), so post-call records
     # alone are not a reliable record of what the model selected.
     calls = [item for item in trace if item.get("event") == "tool_started" and item.get("tool")]
+    if any(item.get("tool") in case.forbidden_calls for item in calls):
+        return False, calls
     cursor = 0
     matched: list[dict[str, Any]] = []
     for expected in case.expected_calls:
@@ -275,6 +301,7 @@ def main() -> int:
                 "expected_calls": [
                     {"tool": item.tool, "arguments": item.arguments} for item in case.expected_calls
                 ],
+                "forbidden_calls": list(case.forbidden_calls),
                 "observed_calls": [
                     {"tool": item.get("tool"), "arguments": item.get("arguments"), "error": item.get("error")}
                     for item in observed_calls

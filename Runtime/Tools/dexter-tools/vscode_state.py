@@ -50,6 +50,65 @@ def _sessions() -> list[dict]:
     return result
 
 
+def _session_label(session: dict) -> str:
+    workspace_name = str(session.get("workspace_name") or "").strip()
+    if workspace_name:
+        return workspace_name
+    folders = [
+        Path(folder).name
+        for folder in session.get("workspace_folders") or []
+        if isinstance(folder, str) and folder
+    ]
+    if folders:
+        return " + ".join(folders)
+    active_file = str(session.get("active_file") or "").strip()
+    return Path(active_file).name if active_file else str(session.get("session_id") or "VS Code")
+
+
+def _last_focused_time(session: dict) -> float:
+    try:
+        return float(session.get("last_focused_unix") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def current_vscode_session() -> dict:
+    """Return the focused or most-recently-focused live VS Code project.
+
+    Dexter's overlay can own foreground focus by the time a typed request is
+    submitted. The bridge therefore persists ``last_focused_unix`` so project
+    selection remains tied to the editor the user actually left, rather than
+    whichever extension heartbeat happened to write last.
+    """
+    sessions = _sessions()
+    if not sessions:
+        raise LookupError(
+            "No live VS Code project is connected to Dexter's workspace extension."
+        )
+
+    focused = [session for session in sessions if session.get("focused")]
+    if len(focused) == 1:
+        return focused[0]
+    if len(sessions) == 1:
+        return sessions[0]
+
+    ranked = sorted(
+        sessions,
+        key=_last_focused_time,
+        reverse=True,
+    )
+    top_focus = _last_focused_time(ranked[0])
+    second_focus = _last_focused_time(ranked[1])
+    if top_focus > 0 and top_focus > second_focus:
+        return ranked[0]
+
+    names = ", ".join(sorted({_session_label(session) for session in sessions}))
+    raise LookupError(
+        "Could not determine which VS Code project was active. Focus the intended "
+        f"VS Code window and try again. Live projects: {names}"
+    )
+
+
 def _window_match_score(os_window: dict, session: dict) -> int:
     title = _norm(os_window.get("title"))
     score = 0

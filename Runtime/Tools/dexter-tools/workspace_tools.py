@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from config import DEFAULT_WORKSPACE_LAUNCH_TIMEOUT_SECONDS, WORKSPACE_EXCLUDED_WINDOW_TITLES
 from launcher import configured_app_alias_for_executable, launch_app
 from resources import open_saved_resource, resource_launch_candidates_for_window
+from saved_name_resolution import rank_named_records, resolve_named_record
 from state_store import load_state, mutate_state
 from workspace_app_state import capture_window_app_state, restore_window_app_state
 from snap_layout import restore_native_snap_layout
@@ -49,16 +50,7 @@ def _validate_name(value: str) -> str:
 def _resolve_workspace(query: str, state: dict | None = None) -> dict:
     clean = _validate_name(query)
     records = list((state or load_state())["workspaces"].values())
-    exact = [r for r in records if _normalize(r["name"]) == _normalize(clean)]
-    if len(exact) == 1:
-        return exact[0]
-    partial = [r for r in records if _normalize(clean) in _normalize(r["name"])]
-    if len(partial) == 1:
-        return partial[0]
-    if not partial:
-        raise LookupError(f"No saved workspace matches {clean!r}.")
-    names = ", ".join(sorted(r["name"] for r in partial))
-    raise LookupError(f"Workspace name is ambiguous: {clean!r}. Matches: {names}")
+    return resolve_named_record(clean, records, record_label="workspace")
 
 
 def _window_persistent_identity(window: dict) -> dict:
@@ -168,10 +160,11 @@ def search_workspaces(query: str | None = None, max_results: int = 10) -> dict:
     state = load_state()
     records = list(state["workspaces"].values())
     if query:
-        q = _normalize(query)
-        records = [record for record in records if q in _normalize(record["name"])]
-    records.sort(key=lambda record: _normalize(record["name"]))
-    selected = records[:max_results]
+        ranked = rank_named_records(query, records)
+        ordered = [record for _score, record in ranked]
+    else:
+        ordered = sorted(records, key=lambda record: _normalize(record["name"]))
+    selected = ordered[:max_results]
     return {
         "status": "ok",
         "operation": "search_workspaces",
@@ -184,7 +177,7 @@ def search_workspaces(query: str | None = None, max_results: int = 10) -> dict:
             }
             for record in selected
         ],
-        "truncated": len(records) > max_results,
+        "truncated": len(ordered) > max_results,
     }
 
 

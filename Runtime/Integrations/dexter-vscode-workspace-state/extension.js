@@ -8,8 +8,12 @@ let root;
 let sessionFile;
 let writeTimer;
 let heartbeatTimer;
+let lastFocusedUnix = 0;
 
 function currentState() {
+  const now = Date.now() / 1000;
+  const focused = !!vscode.window.state.focused;
+  if (focused) lastFocusedUnix = now;
   const folders = (vscode.workspace.workspaceFolders || []).map(folder => folder.uri.fsPath);
   const workspaceFile = vscode.workspace.workspaceFile ? vscode.workspace.workspaceFile.toString(true) : null;
   const active = vscode.window.activeTextEditor;
@@ -20,9 +24,10 @@ function currentState() {
     workspace_file: workspaceFile,
     workspace_folders: folders,
     active_file: active ? active.document.uri.fsPath : null,
-    focused: !!vscode.window.state.focused,
+    focused,
+    last_focused_unix: lastFocusedUnix,
     editor_restore_strategy: 'vscode_native_session',
-    updated_unix: Date.now() / 1000
+    updated_unix: now
   };
 }
 

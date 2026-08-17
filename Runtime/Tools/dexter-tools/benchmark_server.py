@@ -104,8 +104,23 @@ def _simulate(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return {"path": arguments.get("path"), "method": "simulated"}
     if tool == "open_app":
         return {"pid": 4242, "process_alive_after_launch": True}
-    if tool in {"open_file", "open_folder", "open_url"}:
+    if tool in {"open_file", "open_folder", "open_url", "open_resource"}:
         return {"opened": True}
+    if tool == "remember_current_project":
+        return {
+            "name": arguments.get("name") or "Current Project",
+            "kind": "vscode",
+            "target": r"C:\Work\CurrentProject",
+            "aliases": arguments.get("aliases") or [],
+            "created": True,
+            "updated": False,
+        }
+    if tool == "restore_workspace":
+        return {
+            "name": arguments.get("name"),
+            "restored_count": 2,
+            "complete": True,
+        }
     if tool == "set_clipboard":
         return {"length": len(str(arguments.get("text", "")))}
     if tool == "focus_window":
