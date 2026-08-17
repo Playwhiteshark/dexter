@@ -1,0 +1,11 @@
+{
+  "name": "dexter-workspace-state",
+  "displayName": "Dexter Workspace State",
+  "description": "Local-only workspace state bridge for the Dexter desktop assistant.",
+  "version": "0.1.1",
+  "publisher": "dexter-local",
+  "engines": {"vscode": "^1.90.0"},
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js"
+}

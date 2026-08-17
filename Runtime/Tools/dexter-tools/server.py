@@ -305,13 +305,16 @@ def open_resource(name: str) -> dict:
 
 @mcp.tool(annotations=WRITE_LOCAL)
 def save_workspace(name: str, overwrite: bool = False) -> dict:
-    """Save the current user-facing Windows layout, including minimized restore positions."""
+    """Save eligible current-desktop windows plus supported app state such as browser tabs, VS Code editors, Explorer folders, and Terminal cwd."""
     return agent.fields(
         save_current_workspace(name, overwrite),
         "name",
         "window_count",
+        "captured_windows",
         "created",
         "updated",
+        "app_state_window_count",
+        "state_warnings",
     )
 
 
@@ -321,14 +324,20 @@ def restore_workspace(
     launch_missing: bool = True,
     timeout_seconds: float = DEFAULT_WORKSPACE_LAUNCH_TIMEOUT_SECONDS,
 ) -> dict:
-    """Restore a saved Windows layout; safely relaunch known resources/apps when possible."""
+    """Restore a saved Windows layout and its supported per-app state; safely relaunch known resources/apps when possible."""
     return agent.fields(
         restore_saved_workspace(name, launch_missing, timeout_seconds),
         "name",
         "restored_count",
         "launched",
         "missing",
+        "pending",
         "ambiguous",
+        "failed",
+        "warnings",
+        "app_state_restored",
+        "app_state_restored_count",
+        "degraded",
         "complete",
     )
 
@@ -338,7 +347,7 @@ def forget_saved(
     category: Literal["resource", "workspace"],
     name: str,
 ) -> dict:
-    """Forget one saved operational resource or workspace layout."""
+    """Delete one saved operational resource or workspace layout from Dexter's persistent memory."""
     if category == "resource":
         result = forget_resource(name)
     elif category == "workspace":

@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Dexter Workspace Bridge",
+  "version": "0.1.1",
+  "description": "Local-only browser workspace state bridge for Dexter.",
+  "minimum_chrome_version": "105",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4R6OYZul+hIAoOGMzrVcWa638sLpmHJTyqYquo8aFjzpRIvJwxVpGH7UQRrZoKUaZbcu1X8ZywYuVel8x6KXQoa1vZhY/ig/O4eYFx92cXfOI/YCffkj8wyrTvgDwr7RbBRHzdkMdRnMJEIBsHwbrXf35kccKUaNI0i5RE+6GzdQJYK7T3jGrGWDgMtQew5C4Sc33QvsGuUb87+ymhxYedLVpiE4WQZVmrCP6bWROs1yr9DTT6ZTOuy5n3zeePSPy3MUKGzhY40+1jUDVGYAN6VVU74/QIhvm8N/V+DaMsEsH7HeqQmt0I4K7A7E5UXpwp+jI/QbYaW51D7NKOV91QIDAQAB",
+  "permissions": [
+    "tabs",
+    "tabGroups",
+    "nativeMessaging"
+  ],
+  "background": {
+    "service_worker": "service_worker.js"
+  }
+}

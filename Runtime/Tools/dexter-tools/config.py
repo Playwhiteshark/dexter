@@ -45,7 +45,7 @@ DEFAULT_CLIPBOARD_CHARS = 10_000
 DEFAULT_PROCESS_RESULTS = 30
 DEFAULT_WINDOW_RESULTS = 30
 DEFAULT_SAVED_SEARCH_RESULTS = 10
-DEFAULT_WORKSPACE_LAUNCH_TIMEOUT_SECONDS = 6.0
+DEFAULT_WORKSPACE_LAUNCH_TIMEOUT_SECONDS = 20.0
 
 # open_file uses Windows file associations, so executable/script/shortcut types
 # are blocked to avoid bypassing open_app's explicit allowlist.

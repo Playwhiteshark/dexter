@@ -472,6 +472,28 @@ def system_suite() -> list[bool]:
                 "PID + partial process name matched unexpectedly",
             )
 
+    def visible_frame_geometry_translation():
+        outer = {
+            "left": -8, "top": -8, "right": 1008, "bottom": 1008,
+            "width": 1016, "height": 1016,
+        }
+        visible = {
+            "left": 0, "top": 0, "right": 1000, "bottom": 1000,
+            "width": 1000, "height": 1000,
+        }
+        target = {
+            "left": 1000, "top": 0, "right": 2000, "bottom": 1000,
+            "width": 1000, "height": 1000,
+        }
+        translated = windows_tools._outer_bounds_for_visible_target(target, outer, visible)
+        check(
+            translated == {
+                "left": 992, "top": -8, "right": 2008, "bottom": 1008,
+                "width": 1016, "height": 1016,
+            },
+            f"visible-frame translation was wrong: {translated}",
+        )
+
     def window_state_control():
         class FakeUser32:
             def __init__(self):
@@ -546,6 +568,7 @@ def system_suite() -> list[bool]:
         run_case("System: launcher policy guards", launcher_policy_guards),
         run_case("System: process wrapper", process_wrapper),
         run_case("System: optional Windows .exe process suffix", process_name_exe_suffix_optional),
+        run_case("System: DWM-visible frame geometry translation", visible_frame_geometry_translation),
         run_case("System: window minimize/maximize/restore", window_state_control),
         run_case("System: open_url success contract", open_url_result_contract),
     ]
@@ -554,8 +577,13 @@ def system_suite() -> list[bool]:
 def memory_suite() -> list[bool]:
     root = reset_test_root()
     _configure_root(root)
+    import browser_state
     import resources
+    import snap_layout
     import state_store
+    import terminal_state
+    import vscode_state
+    import workspace_providers
     import workspace_tools
 
     state_store.COMPUTER_MEMORY_PATH = root / "computer_memory.json"
@@ -635,6 +663,318 @@ def memory_suite() -> list[bool]:
                 ["-projectPath", str((root / "UnityProject").resolve())],
             )
 
+    def workspace_app_state_capture_is_persisted():
+        placement = {
+            "show_state": "normal",
+            "show_cmd": 1,
+            "visible_bounds": {"left": 0, "top": 0, "right": 1200, "bottom": 800, "width": 1200, "height": 800},
+            "current_bounds": {"left": 0, "top": 0, "right": 1200, "bottom": 800, "width": 1200, "height": 800},
+            "normal_bounds": {"left": 0, "top": 0, "right": 1200, "bottom": 800, "width": 1200, "height": 800},
+        }
+        captured = {
+            "status": "ok",
+            "windows": [{
+                "hwnd": 810,
+                "title": "Dexter - Brave",
+                "pid": 81,
+                "process_name": "brave.exe",
+                "exe": r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+                "placement": placement,
+                "z_index": 0,
+                "resizable": True,
+            }],
+        }
+        app_state = {
+            "kind": "chromium_browser",
+            "browser_kind": "brave",
+            "tabs": [
+                {"url": "https://example.com", "title": "Example", "pinned": False, "active": True, "group_key": None}
+            ],
+            "groups": [],
+            "active_index": 0,
+            "captured_tab_count": 1,
+        }
+        with (
+            patch("workspace_tools.capture_workspace_windows", return_value=captured),
+            patch("workspace_tools.capture_window_app_state", return_value=(app_state, None)),
+            patch("workspace_tools.configured_app_alias_for_executable", return_value=None),
+            patch("workspace_tools.resource_launch_candidates_for_window", return_value=[]),
+        ):
+            saved = workspace_tools.save_workspace("App State Capture")
+
+        check(saved["app_state_window_count"] == 1, f"app state count was not grounded: {saved}")
+        check(not saved["state_warnings"], f"unexpected app-state warning: {saved}")
+        record = workspace_tools._resolve_workspace("App State Capture")
+        stored = record["windows"][0].get("app_state")
+        check(stored == app_state, f"app state was not persisted in workspace memory: {stored}")
+        workspace_tools.forget_workspace("App State Capture")
+
+    def workspace_app_state_restore_runs_before_geometry():
+        placement = {
+            "show_state": "normal",
+            "show_cmd": 1,
+            "visible_bounds": {"left": 10, "top": 10, "right": 1010, "bottom": 710, "width": 1000, "height": 700},
+            "current_bounds": {"left": 10, "top": 10, "right": 1010, "bottom": 710, "width": 1000, "height": 700},
+            "normal_bounds": {"left": 10, "top": 10, "right": 1010, "bottom": 710, "width": 1000, "height": 700},
+        }
+        captured = {"status": "ok", "windows": [{
+            "hwnd": 820, "title": "Project - Visual Studio Code", "pid": 82,
+            "process_name": "Code.exe", "exe": r"C:\Apps\Code.exe",
+            "placement": placement, "z_index": 0, "resizable": True,
+        }]}
+        saved_state = {"kind": "vscode", "workspace_folders": [r"C:\Work\Jarvis"], "tabs": []}
+        with (
+            patch("workspace_tools.capture_workspace_windows", return_value=captured),
+            patch("workspace_tools.capture_window_app_state", return_value=(saved_state, None)),
+            patch("workspace_tools.configured_app_alias_for_executable", return_value=None),
+            patch("workspace_tools.resource_launch_candidates_for_window", return_value=[]),
+        ):
+            workspace_tools.save_workspace("App State Restore")
+
+        current = {"status": "ok", "windows": [{**captured["windows"][0], "hwnd": 821}]}
+        order = []
+        def restore_state(saved, window):
+            order.append("state")
+            check(saved.get("app_state") == saved_state, "saved app state was not supplied to restorer")
+            check(window["hwnd"] == 821, "current HWND was not supplied to app-state restorer")
+            return ({"status": "ok", "kind": "vscode", "tab_count": 3}, None)
+        def restore_geometry(items):
+            order.append("geometry")
+            return {"restored": [{"hwnd": 821, "state": "normal", "verified": True, "warning": None}], "failed": []}
+
+        try:
+            with (
+                patch("workspace_tools.capture_workspace_windows", return_value=current),
+                patch("workspace_tools.vscode_window_matches_saved_state", return_value=None),
+                patch("workspace_tools.restore_window_app_state", side_effect=restore_state),
+                patch("workspace_tools.restore_window_placements_batch", side_effect=restore_geometry),
+            ):
+                result = workspace_tools.restore_workspace("App State Restore", launch_missing=False)
+
+            check(order == ["state", "geometry"], f"app state did not restore before geometry: {order}")
+            check(result["complete"], f"successful app-state restore was reported incomplete: {result}")
+            check(result["app_state_restored_count"] == 1, f"app state success missing: {result}")
+        finally:
+            try:
+                workspace_tools.forget_workspace("App State Restore")
+            except LookupError:
+                pass
+
+    def workspace_app_state_warning_marks_restore_degraded():
+        placement = {
+            "show_state": "normal", "show_cmd": 1,
+            "visible_bounds": {"left": 0, "top": 0, "right": 800, "bottom": 600, "width": 800, "height": 600},
+            "current_bounds": {"left": 0, "top": 0, "right": 800, "bottom": 600, "width": 800, "height": 600},
+            "normal_bounds": {"left": 0, "top": 0, "right": 800, "bottom": 600, "width": 800, "height": 600},
+        }
+        captured = {"status": "ok", "windows": [{
+            "hwnd": 830, "title": "Browser", "pid": 83,
+            "process_name": "brave.exe", "exe": r"C:\Apps\brave.exe",
+            "placement": placement, "z_index": 0, "resizable": True,
+        }]}
+        app_state = {"kind": "chromium_browser", "browser_kind": "brave", "tabs": [{"url": "https://example.com"}]}
+        with (
+            patch("workspace_tools.capture_workspace_windows", return_value=captured),
+            patch("workspace_tools.capture_window_app_state", return_value=(app_state, None)),
+            patch("workspace_tools.configured_app_alias_for_executable", return_value=None),
+            patch("workspace_tools.resource_launch_candidates_for_window", return_value=[]),
+        ):
+            workspace_tools.save_workspace("App State Warning")
+
+        current = {"status": "ok", "windows": [{**captured["windows"][0], "hwnd": 831}]}
+        with (
+            patch("workspace_tools.capture_workspace_windows", return_value=current),
+            patch("workspace_tools.restore_window_app_state", return_value=(None, "browser bridge unavailable")),
+            patch("workspace_tools.restore_window_placements_batch", return_value={
+                "restored": [{"hwnd": 831, "state": "normal", "verified": True, "warning": None}], "failed": []
+            }),
+        ):
+            result = workspace_tools.restore_workspace("App State Warning", launch_missing=False)
+
+        check(result["restored_count"] == 1, f"geometry repair was lost: {result}")
+        check(result["degraded"] is True and not result["complete"], f"app-state failure overstated completion: {result}")
+        check("browser bridge unavailable" in result["warnings"][0]["warning"], f"app-state warning was lost: {result}")
+        workspace_tools.forget_workspace("App State Warning")
+
+    def browser_window_match_prefers_active_tab_title():
+        os_window = {
+            "title": "Local AI - Brave",
+            "visible_bounds": {"left": 0, "top": 0, "right": 1200, "bottom": 900},
+        }
+        windows = [
+            {"id": 1, "left": 0, "top": 0, "width": 1200, "height": 900, "tabs": [{"title": "Other", "active": True}]},
+            {"id": 2, "left": 100, "top": 100, "width": 900, "height": 700, "tabs": [{"title": "Local AI", "active": True}]},
+        ]
+        matched = browser_state.match_browser_window(os_window, windows, "brave")
+        check(matched and matched["id"] == 2, f"active browser tab title did not win matching: {matched}")
+
+    def browser_restore_sanitizes_blank_tabs():
+        saved = {
+            "process_name": "brave.exe",
+            "app_state": {
+                "kind": "chromium_browser",
+                "browser_kind": "brave",
+                "tabs": [
+                    {"url": "about:blank", "active": False},
+                    {"url": "https://chatgpt.com/c/example", "active": True},
+                ],
+                "groups": [],
+                "active_index": 1,
+            },
+        }
+        current = {"title": "ChatGPT - Brave"}
+        bridge_window = {"id": 9, "_bridge_session": "browser-session", "tabs": []}
+        observed = {}
+
+        def fake_restore(kind, session_id, window_id, payload):
+            observed["kind"] = kind
+            observed["session_id"] = session_id
+            observed["window_id"] = window_id
+            observed["payload"] = payload
+            return {
+                "tab_count": len(payload["tabs"]),
+                "reused_tab_count": 1,
+                "created_tab_count": 0,
+                "removed_extra_tab_count": 0,
+                "active_tab_ready": True,
+                "failed_count": 0,
+            }
+
+        with (
+            patch.object(browser_state, "capture_browser_windows", return_value=[bridge_window]),
+            patch.object(browser_state, "match_browser_window", return_value=bridge_window),
+            patch.object(browser_state, "restore_browser_window", side_effect=fake_restore),
+        ):
+            result = browser_state.restore_browser_state(saved, current)
+
+        clean = observed["payload"]["tabs"]
+        check(len(clean) == 1 and clean[0]["url"].startswith("https://chatgpt.com/"), f"blank/internal tab was not sanitized: {clean}")
+        check(observed["payload"]["active_index"] == 0, f"active index was not recomputed after sanitizing: {observed}")
+        check(result["reused_tab_count"] == 1 and result["active_tab_ready"], f"browser reconcile result was lost: {result}")
+        check(not browser_state._restorable_url("about:blank"), "about:blank must never be persisted as a workspace page")
+
+    def vscode_restore_uses_native_editor_session():
+        saved = {
+            "app_state": {
+                "kind": "vscode",
+                "workspace_file": None,
+                "workspace_folders": [r"C:\\Work\\Jarvis"],
+                "active_file": r"C:\\Work\\Jarvis\\main.py",
+                # Old v6 snapshots can contain these. v6.1 must ignore them;
+                # VS Code owns dirty/untitled/editor restoration itself.
+                "tabs": [
+                    {"kind": "text", "uri": "untitled:runtime.md", "active": True},
+                    {"kind": "text", "uri": "file:///C:/Work/Jarvis/main.py"},
+                ],
+            }
+        }
+        current_window = {"title": "main.py - Jarvis - Visual Studio Code"}
+        session = {
+            "session_id": "jarvis",
+            "workspace_file": None,
+            "workspace_folders": [r"C:\\Work\\Jarvis"],
+            "workspace_name": "Jarvis",
+            "active_file": r"C:\\Work\\Jarvis\\main.py",
+        }
+
+        with (
+            patch.object(vscode_state, "match_vscode_session", return_value=session),
+            patch.object(vscode_state, "_wait_for_saved_workspace_session") as wait,
+            patch.object(vscode_state.time, "sleep", return_value=None),
+        ):
+            result = vscode_state.restore_vscode_state(saved, current_window)
+
+        check(result["editor_restore"] == "vscode_native_session", f"VS Code did not defer editor restore to VS Code: {result}")
+        check(result["workspace_switched"] is False, f"VS Code was unnecessarily switched: {result}")
+        wait.assert_not_called()
+
+    def vscode_focus_is_not_window_identity():
+        fake_window = {"title": "Project - Visual Studio Code"}
+        unrelated = {
+            "session_id": "real-live-session",
+            "workspace_name": "Jarvis",
+            "workspace_file": None,
+            "workspace_folders": [r"C:\Users\ahmad\Jarvis"],
+            "active_file": r"C:\Users\ahmad\Jarvis\runtime.md",
+            "focused": True,
+            "updated_unix": time.time(),
+        }
+        with patch("vscode_state._sessions", return_value=[unrelated]):
+            matched = vscode_state.match_vscode_session(fake_window)
+        check(
+            matched is None,
+            f"focused unrelated VS Code session incorrectly claimed the window: {matched}",
+        )
+
+    def vscode_wrong_project_is_not_hijacked():
+        saved = {
+            "title": "Jarvis - Visual Studio Code",
+            "process_name": "Code.exe",
+            "exe": r"C:\\Apps\\Code.exe",
+            "workspace_provider": "vscode",
+            "app_state": {
+                "kind": "vscode",
+                "workspace_file": None,
+                "workspace_folders": [r"C:\\Work\\Jarvis"],
+            },
+        }
+        other = {
+            "hwnd": 901,
+            "title": "Other - Visual Studio Code",
+            "process_name": "Code.exe",
+            "exe": r"C:\\Apps\\Code.exe",
+            "resizable": True,
+        }
+        with patch("workspace_tools.vscode_window_matches_saved_state", return_value=False):
+            candidates = workspace_tools._candidate_windows(saved, [other], set())
+        check(candidates == [], f"Dexter would hijack a different dirty VS Code project: {candidates}")
+
+
+    def terminal_restore_never_replays_saved_commands():
+        state = {
+            "kind": "windows_terminal",
+            "cwd": str(root),
+            "shell_name": "powershell.exe",
+            "commandline": [r"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", "-Command", "Remove-Item important.txt"],
+        }
+        command = terminal_state.terminal_launch_command(state)
+        check(command[:4] == ["wt.exe", "-w", "-1", "new-tab"], f"wrong Terminal launch prefix: {command}")
+        check("--startingDirectory" in command and str(root) in command, f"Terminal cwd missing: {command}")
+        check("-Command" not in command and "Remove-Item important.txt" not in command, f"Terminal replayed saved command arguments: {command}")
+        check(command[-1].casefold().endswith("powershell.exe"), f"Terminal did not preserve safe interactive shell identity: {command}")
+
+    def app_state_provider_launch_uses_saved_context():
+        saved_vscode = {
+            "title": "Jarvis - Visual Studio Code",
+            "process_name": "Code.exe",
+            "exe": r"C:\Apps\Code.exe",
+            "workspace_provider": "vscode",
+            "app_state": {"kind": "vscode", "workspace_folders": [r"C:\Work\Jarvis"]},
+        }
+        with (
+            patch.object(workspace_providers.os, "name", "nt"),
+            patch.object(workspace_providers, "_validated_saved_executable", return_value=r"C:\Apps\Code.exe"),
+            patch.object(workspace_providers, "vscode_open_target", return_value=r"C:\Work\Jarvis"),
+            patch.object(workspace_providers, "_spawn", return_value={"provider": "vscode"}) as spawn,
+        ):
+            workspace_providers.launch_workspace_provider(saved_vscode)
+        spawn.assert_called_once_with([r"C:\Apps\Code.exe", "-n", r"C:\Work\Jarvis"], "vscode")
+
+        saved_terminal = {
+            "title": "Terminal", "process_name": "WindowsTerminal.exe",
+            "workspace_provider": "windows_terminal",
+            "app_state": {"kind": "windows_terminal", "cwd": r"C:\Work\Jarvis"},
+        }
+        with (
+            patch.object(workspace_providers.os, "name", "nt"),
+            patch.object(workspace_providers, "terminal_launch_command", return_value=["wt.exe", "-w", "-1", "new-tab", "--startingDirectory", r"C:\Work\Jarvis"]),
+            patch.object(workspace_providers, "_spawn", return_value={"provider": "windows_terminal"}) as spawn,
+        ):
+            workspace_providers.launch_workspace_provider(saved_terminal)
+        spawn.assert_called_once()
+        check(r"C:\Work\Jarvis" in spawn.call_args.args[0], "Terminal saved cwd was not consumed at launch")
+
+
     def workspace_capture_restore_and_forget():
         fake_placement = {
             "show_state": "minimized",
@@ -669,6 +1009,12 @@ def memory_suite() -> list[bool]:
         ):
             saved = workspace_tools.save_workspace("Focus")
         check(saved["window_count"] == 1, "workspace did not capture one window")
+        check(
+            saved.get("captured_windows") == [
+                {"title": "Notes", "process_name": "notepad.exe", "provider": None}
+            ],
+            f"workspace save did not return grounded captured-window summary: {saved}",
+        )
 
         current = {
             "status": "ok",
@@ -686,22 +1032,689 @@ def memory_suite() -> list[bool]:
         }
         with (
             patch("workspace_tools.capture_workspace_windows", return_value=current),
-            patch("workspace_tools.restore_window_placement") as restore,
+            patch(
+                "workspace_tools.restore_window_placements_batch",
+                return_value={
+                    "restored": [
+                        {
+                            "hwnd": 202,
+                            "state": "minimized",
+                            "verified": True,
+                            "warning": None,
+                        }
+                    ],
+                    "failed": [],
+                },
+            ) as restore_batch,
         ):
             result = workspace_tools.restore_workspace("Focus", launch_missing=False)
         check(result["complete"], f"workspace restore incomplete: {result}")
         check(result["restored_count"] == 1, "workspace did not restore one window")
-        restore.assert_called_once_with(202, fake_placement)
+        restore_batch.assert_called_once_with(
+            [{"hwnd": 202, "placement": fake_placement}]
+        )
 
         deleted = workspace_tools.forget_workspace("Focus")
         check(deleted["deleted"], "workspace was not forgotten")
-        check(not workspace_tools.search_workspaces()["workspaces"], "forgotten workspace remained")
+        check(
+            not workspace_tools.search_workspaces("Focus")["workspaces"],
+            "forgotten workspace remained",
+        )
+
+    def native_snap_plan_for_three_window_layout():
+        def item(hwnd, left, top, right, bottom):
+            return {
+                "hwnd": hwnd,
+                "placement": {
+                    "show_state": "arranged",
+                    "visible_bounds": {
+                        "left": left,
+                        "top": top,
+                        "right": right,
+                        "bottom": bottom,
+                        "width": right - left,
+                        "height": bottom - top,
+                    },
+                },
+            }
+
+        plan = snap_layout.infer_snap_plan(
+            [
+                item(1, 0, 0, 1219, 1704),
+                item(2, 1219, 0, 2880, 1272),
+                item(3, 1219, 1272, 2880, 1704),
+            ]
+        )
+        zones = {window.hwnd: window.zone for window in plan.windows}
+        check(zones == {1: "left", 2: "top-right", 3: "bottom-right"}, f"wrong Snap zones: {zones}")
+        vertical = [d for d in plan.dividers if d.axis == "vertical"]
+        horizontal = [d for d in plan.dividers if d.axis == "horizontal"]
+        check(len(vertical) == 1 and vertical[0].target == 1219, f"wrong vertical divider: {vertical}")
+        check(len(horizontal) == 1 and horizontal[0].target == 1272, f"wrong horizontal divider: {horizontal}")
+        check(horizontal[0].segment_start == 1219 and horizontal[0].segment_end == 2880, "wrong right-side divider span")
+
+    def workspace_restore_prefers_native_snap_for_arranged_group():
+        def placement(left, top, right, bottom):
+            return {
+                "show_state": "arranged",
+                "show_cmd": 1,
+                "visible_bounds": {
+                    "left": left, "top": top, "right": right, "bottom": bottom,
+                    "width": right - left, "height": bottom - top,
+                },
+                "current_bounds": {
+                    "left": left, "top": top, "right": right, "bottom": bottom,
+                    "width": right - left, "height": bottom - top,
+                },
+                "normal_bounds": {
+                    "left": 100, "top": 100, "right": 900, "bottom": 700,
+                    "width": 800, "height": 600,
+                },
+            }
+
+        saved_windows = [
+            {"hwnd": 1, "title": "Left", "pid": 1, "process_name": "left.exe", "exe": r"C:\\Apps\\left.exe", "placement": placement(0, 0, 1219, 1704), "z_index": 0},
+            {"hwnd": 2, "title": "Top Right", "pid": 2, "process_name": "top.exe", "exe": r"C:\\Apps\\top.exe", "placement": placement(1219, 0, 2880, 1272), "z_index": 1},
+            {"hwnd": 3, "title": "Bottom Right", "pid": 3, "process_name": "bottom.exe", "exe": r"C:\\Apps\\bottom.exe", "placement": placement(1219, 1272, 2880, 1704), "z_index": 2},
+        ]
+        captured_save = {"status": "ok", "windows": saved_windows}
+        with (
+            patch("workspace_tools.capture_workspace_windows", return_value=captured_save),
+            patch("workspace_tools.configured_app_alias_for_executable", return_value=None),
+            patch("workspace_tools.resource_launch_candidates_for_window", return_value=[]),
+        ):
+            workspace_tools.save_workspace("Native Snap Test")
+
+        current = {"status": "ok", "windows": [{**item, "hwnd": item["hwnd"] + 100} for item in saved_windows]}
+        native_restored = [
+            {"hwnd": 101, "state": "arranged", "verified": True},
+            {"hwnd": 102, "state": "arranged", "verified": True},
+            {"hwnd": 103, "state": "arranged", "verified": True},
+        ]
+        with (
+            patch("workspace_tools.capture_workspace_windows", return_value=current),
+            patch(
+                "workspace_tools.restore_native_snap_layout",
+                return_value={
+                    "attempted": True,
+                    "supported": True,
+                    "complete": True,
+                    "restored": native_restored,
+                    "failed": [],
+                },
+            ) as native,
+            patch("workspace_tools.restore_window_placements_batch") as generic,
+        ):
+            result = workspace_tools.restore_workspace("Native Snap Test", launch_missing=False)
+
+        check(result["complete"], f"native Snap workspace restore incomplete: {result}")
+        check(result["restored_count"] == 3, f"wrong native Snap restore count: {result}")
+        native.assert_called_once()
+        passed = native.call_args.args[0]
+        check([item["hwnd"] for item in passed] == [101, 102, 103], f"wrong arranged HWNDs: {passed}")
+        generic.assert_not_called()
+
+    def workspace_native_snap_failure_falls_back_to_exact_geometry():
+        def placement(left, top, right, bottom):
+            return {
+                "show_state": "arranged",
+                "show_cmd": 1,
+                "visible_bounds": {
+                    "left": left, "top": top, "right": right, "bottom": bottom,
+                    "width": right - left, "height": bottom - top,
+                },
+                "current_bounds": {
+                    "left": left, "top": top, "right": right, "bottom": bottom,
+                    "width": right - left, "height": bottom - top,
+                },
+                "normal_bounds": {
+                    "left": 100, "top": 100, "right": 900, "bottom": 700,
+                    "width": 800, "height": 600,
+                },
+            }
+
+        saved_windows = [
+            {"hwnd": 1, "title": "Left Fallback", "pid": 1, "process_name": "left-fallback.exe", "exe": r"C:\\Apps\\left-fallback.exe", "placement": placement(0, 0, 1440, 1704), "z_index": 0},
+            {"hwnd": 2, "title": "Right Fallback", "pid": 2, "process_name": "right-fallback.exe", "exe": r"C:\\Apps\\right-fallback.exe", "placement": placement(1440, 0, 2880, 1704), "z_index": 1},
+        ]
+        with (
+            patch("workspace_tools.capture_workspace_windows", return_value={"status": "ok", "windows": saved_windows}),
+            patch("workspace_tools.configured_app_alias_for_executable", return_value=None),
+            patch("workspace_tools.resource_launch_candidates_for_window", return_value=[]),
+        ):
+            workspace_tools.save_workspace("Snap Fallback")
+
+        current = {"status": "ok", "windows": [{**item, "hwnd": item["hwnd"] + 200} for item in saved_windows]}
+        fallback_result = {
+            "restored": [
+                {"hwnd": 201, "state": "arranged", "verified": True, "warning": None},
+                {"hwnd": 202, "state": "arranged", "verified": True, "warning": None},
+            ],
+            "failed": [],
+        }
+        with (
+            patch("workspace_tools.capture_workspace_windows", return_value=current),
+            patch(
+                "workspace_tools.restore_native_snap_layout",
+                return_value={
+                    "attempted": True,
+                    "supported": True,
+                    "complete": False,
+                    "restored": [],
+                    "failed": [{"reason": "synthetic input blocked"}],
+                },
+            ),
+            patch("workspace_tools.restore_window_placements_batch", return_value=fallback_result) as generic,
+        ):
+            result = workspace_tools.restore_workspace("Snap Fallback", launch_missing=False)
+
+        check(not result["complete"], f"degraded Snap fallback must not claim complete: {result}")
+        check(result.get("degraded") is True, f"degraded flag missing: {result}")
+        check(result["restored_count"] == 2, f"fallback restore count wrong: {result}")
+        check(result["warnings"], "native Snap failure did not surface a warning")
+        check("synthetic input blocked" in result["warnings"][0]["warning"], f"native failure reason lost: {result}")
+        generic.assert_called_once()
+
+    def snap_corner_sequence_is_paced():
+        send_calls = []
+        sleep_calls = []
+
+        def capture_send(events):
+            send_calls.append([int(event.ki.wVk) for event in events])
+
+        with (
+            patch("snap_layout._focus", return_value=None),
+            patch("snap_layout._send_inputs", side_effect=capture_send),
+            patch("snap_layout._press_key", return_value=None),
+            patch("snap_layout.time.sleep", side_effect=lambda value: sleep_calls.append(value)),
+            patch("snap_layout.windows_tools._is_window_arranged", return_value=True),
+        ):
+            snap_layout._send_native_snap(1234, "top-right")
+
+        check(
+            send_calls == [
+                [snap_layout.VK_LWIN],
+                [snap_layout.VK_RIGHT, snap_layout.VK_RIGHT],
+                [snap_layout.VK_UP, snap_layout.VK_UP],
+                [snap_layout.VK_LWIN],
+            ],
+            f"corner Snap was not split into paced Win+arrow input: {send_calls}",
+        )
+        check(0.20 in sleep_calls, f"corner Snap did not pause between side and vertical arrows: {sleep_calls}")
+
+    def snap_focus_uses_attached_input_fallback():
+        class FakeKernel32:
+            @staticmethod
+            def GetCurrentThreadId():
+                return 30
+
+        class FakeUser32:
+            def __init__(self):
+                self.foreground = 900
+                self.attach_calls = []
+
+            def GetForegroundWindow(self):
+                return self.foreground
+
+            def GetWindowThreadProcessId(self, hwnd, _pid):
+                if int(hwnd) == 900:
+                    return 10
+                if int(hwnd) == 1234:
+                    return 20
+                return 0
+
+            def AttachThreadInput(self, current, other, attach):
+                self.attach_calls.append((int(current), int(other), bool(attach)))
+                return True
+
+            def BringWindowToTop(self, _hwnd):
+                return True
+
+            def SetForegroundWindow(self, hwnd):
+                self.foreground = int(hwnd)
+                return True
+
+            def SetFocus(self, _hwnd):
+                return 0
+
+        fake_user32 = FakeUser32()
+        with (
+            patch("snap_layout.windows_tools.focus_window_verified", side_effect=RuntimeError("foreground lock")),
+            patch.object(snap_layout, "user32", fake_user32),
+            patch.object(snap_layout, "kernel32", FakeKernel32()),
+            patch("snap_layout.time.sleep", return_value=None),
+            patch("snap_layout._press_key", return_value=None),
+        ):
+            snap_layout._focus(1234)
+
+        check(fake_user32.foreground == 1234, "attached-input fallback did not activate target")
+        check(
+            (30, 10, True) in fake_user32.attach_calls and (30, 20, True) in fake_user32.attach_calls,
+            f"foreground/target input queues were not attached: {fake_user32.attach_calls}",
+        )
+        check(
+            (30, 10, False) in fake_user32.attach_calls and (30, 20, False) in fake_user32.attach_calls,
+            f"attached input queues were not detached: {fake_user32.attach_calls}",
+        )
+
+    def snap_divider_uses_fast_path_then_conservative_fallback():
+        divider = type("Divider", (), {"axis": "vertical", "target": 1219})()
+
+        fast_calls = []
+        fast_verify = iter([False, True])
+        with (
+            patch(
+                "snap_layout._divider_target_verified",
+                side_effect=lambda _plan, _divider: next(fast_verify),
+            ),
+            patch(
+                "snap_layout._drag_divider_once",
+                side_effect=lambda _plan, _divider, conservative=False: fast_calls.append(bool(conservative)),
+            ),
+        ):
+            snap_layout._drag_plan_divider(object(), divider)
+
+        check(fast_calls == [False], f"successful fast Snap drag did not stop immediately: {fast_calls}")
+
+        fallback_calls = []
+        fallback_verify = iter([False, False, True])
+        with (
+            patch(
+                "snap_layout._divider_target_verified",
+                side_effect=lambda _plan, _divider: next(fallback_verify),
+            ),
+            patch(
+                "snap_layout._drag_divider_once",
+                side_effect=lambda _plan, _divider, conservative=False: fallback_calls.append(bool(conservative)),
+            ),
+        ):
+            snap_layout._drag_plan_divider(object(), divider)
+
+        check(
+            fallback_calls == [False, True],
+            f"failed fast Snap drag did not fall back to conservative sequence: {fallback_calls}",
+        )
+        check(
+            snap_layout.SNAP_DIVIDER_FAST_HOVER_SECONDS < snap_layout.SNAP_DIVIDER_SLOW_HOVER_SECONDS,
+            "fast Snap profile is not actually faster than conservative hover timing",
+        )
+
+    def workspace_restore_reports_one_failure_without_losing_successes():
+        placement = {
+            "show_state": "normal",
+            "show_cmd": 1,
+            "current_bounds": {
+                "left": 0, "top": 0, "right": 800, "bottom": 600,
+                "width": 800, "height": 600,
+            },
+            "visible_bounds": {
+                "left": 0, "top": 0, "right": 800, "bottom": 600,
+                "width": 800, "height": 600,
+            },
+            "normal_bounds": {
+                "left": 0, "top": 0, "right": 800, "bottom": 600,
+                "width": 800, "height": 600,
+            },
+        }
+        captured = {
+            "status": "ok",
+            "windows": [
+                {
+                    "hwnd": 10, "title": "One", "pid": 1,
+                    "process_name": "one.exe", "exe": r"C:\Apps\one.exe",
+                    "placement": placement, "z_index": 0,
+                },
+                {
+                    "hwnd": 11, "title": "Two", "pid": 2,
+                    "process_name": "two.exe", "exe": r"C:\Apps\two.exe",
+                    "placement": placement, "z_index": 1,
+                },
+            ],
+        }
+        with (
+            patch("workspace_tools.capture_workspace_windows", return_value=captured),
+            patch("workspace_tools.configured_app_alias_for_executable", return_value=None),
+            patch("workspace_tools.resource_launch_candidates_for_window", return_value=[]),
+        ):
+            workspace_tools.save_workspace("Partial Restore")
+
+        current = {
+            "status": "ok",
+            "windows": [
+                {**captured["windows"][0], "hwnd": 20},
+                {**captured["windows"][1], "hwnd": 21},
+            ],
+        }
+        with (
+            patch("workspace_tools.capture_workspace_windows", return_value=current),
+            patch(
+                "workspace_tools.restore_window_placements_batch",
+                return_value={
+                    "restored": [
+                        {"hwnd": 20, "state": "normal", "verified": True, "warning": None}
+                    ],
+                    "failed": [
+                        {
+                            "hwnd": 21,
+                            "error": "window did not settle at the requested bounds",
+                            "coordinate_space": "visible",
+                            "requested": placement["visible_bounds"],
+                            "observed": {**placement["visible_bounds"], "left": 4},
+                        }
+                    ],
+                },
+            ),
+        ):
+            result = workspace_tools.restore_workspace("Partial Restore", launch_missing=False)
+
+        check(result["restored_count"] == 1, f"successful window was lost: {result}")
+        check(len(result["failed"]) == 1, f"failed window was not reported: {result}")
+        check(not result["complete"], "partial restore incorrectly reported complete")
+        check(result["failed"][0]["title"] == "Two", "failure lost window identity")
+        workspace_tools.forget_workspace("Partial Restore")
+
+    def workspace_reopen_waits_past_splash_for_stable_main_window():
+        placement = {
+            "show_state": "normal",
+            "show_cmd": 1,
+            "current_bounds": {
+                "left": 100, "top": 100, "right": 900, "bottom": 700,
+                "width": 800, "height": 600,
+            },
+            "visible_bounds": {
+                "left": 110, "top": 100, "right": 890, "bottom": 690,
+                "width": 780, "height": 590,
+            },
+            "normal_bounds": {
+                "left": 100, "top": 100, "right": 900, "bottom": 700,
+                "width": 800, "height": 600,
+            },
+            "geometry_space": "dwm_extended_frame",
+        }
+        saved_capture = {
+            "status": "ok",
+            "windows": [
+                {
+                    "hwnd": 300,
+                    "title": "scene.blend - Blender",
+                    "pid": 30,
+                    "process_name": "blender.exe",
+                    "exe": r"C:\Program Files\Blender Foundation\Blender\blender.exe",
+                    "resizable": True,
+                    "placement": placement,
+                    "z_index": 0,
+                }
+            ],
+        }
+        with (
+            patch("workspace_tools.capture_workspace_windows", return_value=saved_capture),
+            patch("workspace_tools.configured_app_alias_for_executable", return_value=None),
+            patch("workspace_tools.resource_launch_candidates_for_window", return_value=[]),
+        ):
+            workspace_tools.save_workspace("Splash Restore")
+
+        splash = {
+            **saved_capture["windows"][0],
+            "hwnd": 301,
+            "title": "Blender Loading",
+            "resizable": False,
+        }
+        main = {
+            **saved_capture["windows"][0],
+            "hwnd": 302,
+            "title": "scene.blend - Blender",
+            "resizable": True,
+        }
+        calls = {"value": 0}
+
+        def capture_sequence():
+            calls["value"] += 1
+            if calls["value"] == 1:
+                return {"status": "ok", "windows": []}
+            if calls["value"] == 2:
+                return {"status": "ok", "windows": [splash]}
+            return {"status": "ok", "windows": [main]}
+
+        with (
+            patch("workspace_tools.capture_workspace_windows", side_effect=capture_sequence),
+            patch("workspace_tools.launch_workspace_provider", return_value={"provider": "blender"}) as launch,
+            patch("workspace_tools.time.sleep", return_value=None),
+            patch(
+                "workspace_tools.restore_window_placements_batch",
+                return_value={
+                    "restored": [
+                        {"hwnd": 302, "state": "normal", "verified": True, "warning": None}
+                    ],
+                    "failed": [],
+                },
+            ) as restore_batch,
+        ):
+            result = workspace_tools.restore_workspace("Splash Restore", timeout_seconds=1.0)
+
+        check(result["complete"], f"reopened workspace was incomplete: {result}")
+        check(result["launched"] == ["provider:blender"], f"unexpected launch record: {result}")
+        check(not result["pending"], f"splash incorrectly remained pending: {result}")
+        launch.assert_called_once()
+        restore_batch.assert_called_once_with([{"hwnd": 302, "placement": placement}])
+        workspace_tools.forget_workspace("Splash Restore")
+
+    def workspace_reopen_leaves_transient_splash_pending():
+        placement = {
+            "show_state": "normal",
+            "show_cmd": 1,
+            "current_bounds": {
+                "left": 10, "top": 10, "right": 810, "bottom": 610,
+                "width": 800, "height": 600,
+            },
+            "visible_bounds": {
+                "left": 20, "top": 10, "right": 800, "bottom": 600,
+                "width": 780, "height": 590,
+            },
+            "normal_bounds": {
+                "left": 10, "top": 10, "right": 810, "bottom": 610,
+                "width": 800, "height": 600,
+            },
+            "geometry_space": "dwm_extended_frame",
+        }
+        saved_capture = {
+            "status": "ok",
+            "windows": [
+                {
+                    "hwnd": 400,
+                    "title": "Blender",
+                    "pid": 40,
+                    "process_name": "blender.exe",
+                    "exe": r"C:\Program Files\Blender Foundation\Blender\blender.exe",
+                    "resizable": True,
+                    "placement": placement,
+                    "z_index": 0,
+                }
+            ],
+        }
+        with (
+            patch("workspace_tools.capture_workspace_windows", return_value=saved_capture),
+            patch("workspace_tools.configured_app_alias_for_executable", return_value=None),
+            patch("workspace_tools.resource_launch_candidates_for_window", return_value=[]),
+        ):
+            workspace_tools.save_workspace("Pending Splash")
+
+        splash = {
+            **saved_capture["windows"][0],
+            "hwnd": 401,
+            "title": "Blender Loading",
+            "resizable": False,
+        }
+        calls = {"value": 0}
+
+        def capture_sequence():
+            calls["value"] += 1
+            if calls["value"] == 1:
+                return {"status": "ok", "windows": []}
+            return {"status": "ok", "windows": [splash]}
+
+        with (
+            patch("workspace_tools.capture_workspace_windows", side_effect=capture_sequence),
+            patch("workspace_tools.launch_workspace_provider", return_value={"provider": "blender"}),
+            patch("workspace_tools.time.sleep", return_value=None),
+            patch(
+                "workspace_tools.restore_window_placements_batch",
+                return_value={"restored": [], "failed": []},
+            ) as restore_batch,
+        ):
+            result = workspace_tools.restore_workspace("Pending Splash", timeout_seconds=0.01)
+
+        check(not result["complete"], "transient-only restore incorrectly reported complete")
+        check(len(result["pending"]) == 1, f"pending startup was not reported: {result}")
+        check(
+            "Blender Loading" in result["pending"][0].get("transient_titles", []),
+            f"transient window identity was lost: {result}",
+        )
+        restore_batch.assert_not_called()
+        workspace_tools.forget_workspace("Pending Splash")
+
+    def workspace_launch_failure_does_not_abort_other_windows():
+        placement = {
+            "show_state": "normal",
+            "show_cmd": 1,
+            "current_bounds": {
+                "left": 0, "top": 0, "right": 800, "bottom": 600,
+                "width": 800, "height": 600,
+            },
+            "visible_bounds": {
+                "left": 0, "top": 0, "right": 800, "bottom": 600,
+                "width": 800, "height": 600,
+            },
+            "normal_bounds": {
+                "left": 0, "top": 0, "right": 800, "bottom": 600,
+                "width": 800, "height": 600,
+            },
+            "geometry_space": "dwm_extended_frame",
+        }
+        saved_capture = {
+            "status": "ok",
+            "windows": [
+                {
+                    "hwnd": 500, "title": "Blender", "pid": 50,
+                    "process_name": "blender.exe",
+                    "exe": r"C:\Apps\blender.exe", "resizable": True,
+                    "placement": placement, "z_index": 0,
+                },
+                {
+                    "hwnd": 501, "title": "Notes", "pid": 51,
+                    "process_name": "notepad.exe",
+                    "exe": r"C:\Windows\System32\notepad.exe", "resizable": True,
+                    "placement": placement, "z_index": 1,
+                },
+            ],
+        }
+        with (
+            patch("workspace_tools.capture_workspace_windows", return_value=saved_capture),
+            patch("workspace_tools.configured_app_alias_for_executable", return_value=None),
+            patch("workspace_tools.resource_launch_candidates_for_window", return_value=[]),
+        ):
+            workspace_tools.save_workspace("Launch Isolation")
+
+        current = {
+            "status": "ok",
+            "windows": [{**saved_capture["windows"][1], "hwnd": 601}],
+        }
+        with (
+            patch("workspace_tools.capture_workspace_windows", return_value=current),
+            patch("workspace_tools.launch_workspace_provider", side_effect=RuntimeError("launcher broke")),
+            patch(
+                "workspace_tools.restore_window_placements_batch",
+                return_value={
+                    "restored": [
+                        {"hwnd": 601, "state": "normal", "verified": True, "warning": None}
+                    ],
+                    "failed": [],
+                },
+            ),
+        ):
+            result = workspace_tools.restore_workspace("Launch Isolation", timeout_seconds=0.01)
+
+        check(result["restored_count"] == 1, f"other window was not restored: {result}")
+        check(len(result["failed"]) == 1, f"launch failure was not isolated: {result}")
+        check("launcher broke" in result["failed"][0]["reason"], f"launch error was lost: {result}")
+        workspace_tools.forget_workspace("Launch Isolation")
+
+    def steam_provider_reopens_main_client_without_webhelper():
+        import workspace_providers
+
+        saved = {
+            "title": "Steam",
+            "process_name": "steamwebhelper.exe",
+            "exe": r"C:\Program Files (x86)\Steam\bin\cef\cef.win7x64\steamwebhelper.exe",
+            "workspace_provider": "steam",
+        }
+
+        # Preferred path: the registered Steam URI reopens the client whether
+        # Steam is fully closed or merely sitting in the tray.
+        with (
+            patch.object(workspace_providers.os, "name", "nt"),
+            patch.object(workspace_providers.os, "startfile", create=True) as startfile,
+            patch.object(workspace_providers, "_spawn") as spawn,
+        ):
+            result = workspace_providers.launch_workspace_provider(saved)
+        check(result["provider"] == "steam", f"Steam provider was not selected: {result}")
+        check(result.get("transport") == "registered_protocol", f"Steam URI path was not used: {result}")
+        startfile.assert_called_once_with("steam://open/main")
+        spawn.assert_not_called()
+
+        # Fallback path: if the protocol association is unavailable, resolve
+        # the real Steam client and never dispatch steamwebhelper.exe itself.
+        with (
+            patch.object(workspace_providers.os, "name", "nt"),
+            patch.object(
+                workspace_providers.os,
+                "startfile",
+                side_effect=OSError("protocol unavailable"),
+                create=True,
+            ),
+            patch.object(
+                workspace_providers,
+                "_find_steam_executable",
+                return_value=r"C:\Program Files (x86)\Steam\steam.exe",
+            ) as find_steam,
+            patch.object(
+                workspace_providers,
+                "_spawn",
+                return_value={"provider": "steam", "dispatched": True},
+            ) as spawn,
+        ):
+            fallback = workspace_providers.launch_workspace_provider(saved)
+
+        check(fallback["provider"] == "steam", f"Steam fallback failed: {fallback}")
+        find_steam.assert_called_once_with(saved)
+        spawn.assert_called_once_with([r"C:\Program Files (x86)\Steam\steam.exe"], "steam")
+
 
     return [
         run_case("Memory: named resource aliases + overwrite guard", resource_round_trip_and_aliases),
         run_case("Memory: typed development project validation", typed_project_validation),
         run_case("Memory: typed project open dispatch", typed_project_open_dispatch),
+        run_case("Workspace: persist per-app internal state", workspace_app_state_capture_is_persisted),
+        run_case("Workspace: restore app state before geometry", workspace_app_state_restore_runs_before_geometry),
+        run_case("Workspace: app-state failure is honestly degraded", workspace_app_state_warning_marks_restore_degraded),
+        run_case("Workspace: browser window matches active saved tab", browser_window_match_prefers_active_tab_title),
+        run_case("Workspace: browser restore sanitizes blank tabs", browser_restore_sanitizes_blank_tabs),
+        run_case("Workspace: VS Code defers editor restore to native session", vscode_restore_uses_native_editor_session),
+        run_case("Workspace: VS Code focus is not window identity", vscode_focus_is_not_window_identity),
+        run_case("Workspace: VS Code does not hijack another project", vscode_wrong_project_is_not_hijacked),
+        run_case("Workspace: Terminal restore never replays old commands", terminal_restore_never_replays_saved_commands),
+        run_case("Workspace: app providers launch saved context", app_state_provider_launch_uses_saved_context),
         run_case("Workspace: capture/restore placement + forget", workspace_capture_restore_and_forget),
+        run_case("Workspace: infer native three-window Snap topology", native_snap_plan_for_three_window_layout),
+        run_case("Workspace: prefer native Snap restore for arranged group", workspace_restore_prefers_native_snap_for_arranged_group),
+        run_case("Workspace: native Snap failure is reported as degraded", workspace_native_snap_failure_falls_back_to_exact_geometry),
+        run_case("Workspace: paced native corner Snap input", snap_corner_sequence_is_paced),
+        run_case("Workspace: attached-input focus fallback", snap_focus_uses_attached_input_fallback),
+        run_case("Workspace: fast Snap divider with conservative fallback", snap_divider_uses_fast_path_then_conservative_fallback),
+        run_case("Workspace: isolate/report per-window restore failure", workspace_restore_reports_one_failure_without_losing_successes),
+        run_case("Workspace: reopen waits past splash for stable main window", workspace_reopen_waits_past_splash_for_stable_main_window),
+        run_case("Workspace: transient splash remains pending without resize", workspace_reopen_leaves_transient_splash_pending),
+        run_case("Workspace: launch failure does not abort other windows", workspace_launch_failure_does_not_abort_other_windows),
+        run_case("Workspace: Steam reopens main client without steamwebhelper", steam_provider_reopens_main_client_without_webhelper),
     ]
 
 
@@ -830,6 +1843,59 @@ def mcp_suite() -> list[bool]:
         for tool in tools:
             check(tool.annotations is not None, f"missing annotations: {tool.name}")
 
+    def workspace_delete_wrapper_contract():
+        with patch(
+            "server.forget_workspace",
+            return_value={
+                "status": "ok",
+                "operation": "forget_workspace",
+                "id": "ws_test",
+                "name": "Delete Me",
+                "deleted": True,
+            },
+        ) as mocked:
+            result = server.forget_saved("workspace", "Delete Me")
+        check(result == {"name": "Delete Me", "deleted": True}, f"unexpected workspace delete wrapper result: {result}")
+        mocked.assert_called_once_with("Delete Me")
+
+    def workspace_app_state_wrapper_contract():
+        with patch(
+            "server.save_current_workspace",
+            return_value={
+                "name": "Coding",
+                "window_count": 2,
+                "captured_windows": [],
+                "created": True,
+                "updated": False,
+                "app_state_window_count": 2,
+                "state_warnings": [{"warning": "example"}],
+            },
+        ):
+            saved = server.save_workspace("Coding")
+        check(saved.get("app_state_window_count") == 2, f"save wrapper dropped app-state count: {saved}")
+        check(saved.get("state_warnings") == [{"warning": "example"}], f"save wrapper dropped app-state warnings: {saved}")
+
+        with patch(
+            "server.restore_saved_workspace",
+            return_value={
+                "name": "Coding",
+                "restored_count": 2,
+                "launched": [],
+                "missing": [],
+                "pending": [],
+                "ambiguous": [],
+                "failed": [],
+                "warnings": [],
+                "app_state_restored": [{"kind": "vscode"}, {"kind": "chromium_browser"}],
+                "app_state_restored_count": 2,
+                "degraded": False,
+                "complete": True,
+            },
+        ):
+            restored = server.restore_workspace("Coding")
+        check(restored.get("app_state_restored_count") == 2, f"restore wrapper dropped app-state count: {restored}")
+        check(len(restored.get("app_state_restored") or []) == 2, f"restore wrapper dropped app-state details: {restored}")
+
     def image_failure_does_not_return_image_content():
         bad = root / "broken.bin"
         bad.write_bytes(b"broken")
@@ -845,6 +1911,8 @@ def mcp_suite() -> list[bool]:
 
     return [
         run_case("MCP: registration + standard annotations", registration_and_annotations),
+        run_case("MCP: delete-workspace wrapper contract", workspace_delete_wrapper_contract),
+        run_case("MCP: workspace app-state wrapper contract", workspace_app_state_wrapper_contract),
         run_case("MCP: corrupt-image recovery contract", image_failure_does_not_return_image_content),
     ]
 
