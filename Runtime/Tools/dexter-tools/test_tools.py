@@ -403,6 +403,74 @@ def system_suite() -> list[bool]:
         result = process_tools.process_running(pid=os.getpid())
         check(result["running"], "current test process was not found")
 
+    def process_name_exe_suffix_optional():
+        class FakeProcess:
+            def __init__(self, pid: int, name: str):
+                self.info = {"pid": pid, "name": name}
+
+        fake_pid = 4242
+        fake_name = "ollama.exe"
+
+        # Name-only lookups: .exe must be optional, but matching must remain
+        # exact apart from that suffix.
+        with patch.object(
+            process_tools.psutil,
+            "process_iter",
+            return_value=[FakeProcess(fake_pid, fake_name)],
+        ):
+            without_exe = process_tools.process_running(name="ollama")
+        check(without_exe["running"], "name without .exe did not match ollama.exe")
+        check(
+            without_exe["matches"] == [{"pid": fake_pid, "name": fake_name}],
+            f"unexpected name-only match result: {without_exe}",
+        )
+
+        with patch.object(
+            process_tools.psutil,
+            "process_iter",
+            return_value=[FakeProcess(fake_pid, fake_name)],
+        ):
+            with_exe = process_tools.process_running(name="ollama.exe")
+        check(with_exe["running"], "name with .exe did not match ollama.exe")
+
+        with patch.object(
+            process_tools.psutil,
+            "process_iter",
+            return_value=[FakeProcess(fake_pid, fake_name)],
+        ):
+            partial = process_tools.process_running(name="oll")
+        check(not partial["running"], "partial process name matched unexpectedly")
+
+        with patch.object(
+            process_tools.psutil,
+            "process_iter",
+            return_value=[FakeProcess(fake_pid, "chromedriver.exe")],
+        ):
+            similar = process_tools.process_running(name="chrome")
+        check(not similar["running"], "chrome incorrectly matched chromedriver.exe")
+
+        # PID + name lookups must use the same normalization.
+        class FakePidProcess:
+            def name(self):
+                return fake_name
+
+        with (
+            patch.object(process_tools.psutil, "pid_exists", return_value=True),
+            patch.object(process_tools.psutil, "Process", return_value=FakePidProcess()),
+        ):
+            check(
+                process_tools.process_running(pid=fake_pid, name="ollama")["running"],
+                "PID + name without .exe did not match ollama.exe",
+            )
+            check(
+                process_tools.process_running(pid=fake_pid, name="ollama.exe")["running"],
+                "PID + name with .exe did not match ollama.exe",
+            )
+            check(
+                not process_tools.process_running(pid=fake_pid, name="oll")["running"],
+                "PID + partial process name matched unexpectedly",
+            )
+
     def open_url_result_contract():
         with patch(
             "server.open_http_url",
@@ -420,6 +488,7 @@ def system_suite() -> list[bool]:
         run_case("System: compact foreground-window result", foreground_contract),
         run_case("System: launcher policy guards", launcher_policy_guards),
         run_case("System: process wrapper", process_wrapper),
+        run_case("System: optional Windows .exe process suffix", process_name_exe_suffix_optional),
         run_case("System: open_url success contract", open_url_result_contract),
     ]
 

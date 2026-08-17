@@ -55,7 +55,13 @@ def process_running(
     if pid is not None and pid <= 0:
         raise ValueError("pid must be a positive integer.")
 
-    name_lower = name.lower().strip() if name else None
+    def normalize_process_name(value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized.endswith(".exe"):
+            normalized = normalized[:-4]
+        return normalized
+
+    name_normalized = normalize_process_name(name) if name else None
     matches: list[dict] = []
 
     if pid is not None:
@@ -70,24 +76,36 @@ def process_running(
         try:
             process = psutil.Process(pid)
             process_name = process.name()
-            if name_lower and process_name.lower() != name_lower:
+
+            if (
+                name_normalized
+                and normalize_process_name(process_name) != name_normalized
+            ):
                 return {
                     "status": "ok",
                     "operation": "is_process_running",
                     "running": False,
                     "matches": [],
                 }
+
             matches.append({"pid": pid, "name": process_name})
+
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
+
     else:
         for process in psutil.process_iter(attrs=["pid", "name"]):
             try:
                 process_name = process.info.get("name") or ""
-                if process_name.lower() == name_lower:
+
+                if normalize_process_name(process_name) == name_normalized:
                     matches.append(
-                        {"pid": process.info["pid"], "name": process_name}
+                        {
+                            "pid": process.info["pid"],
+                            "name": process_name,
+                        }
                     )
+
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
 

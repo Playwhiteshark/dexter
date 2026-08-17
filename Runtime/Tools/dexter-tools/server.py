@@ -291,7 +291,7 @@ def list_processes(query: str | None = None, max_results: int = DEFAULT_PROCESS_
 
 @mcp.tool(annotations=READ_ONLY_LOCAL)
 def is_process_running(pid: int | None = None, name: str | None = None) -> dict:
-    """Check for a process by PID, exact process name, or both."""
+    """Check for a process by PID, exact process name, or both. On Windows, the .exe suffix is optional."""
     return agent.fields(process_running(pid, name), "running", "matches", "truncated")
 
 
