@@ -998,26 +998,22 @@ def close_app_gracefully(pid: int, timeout_seconds: float = 5.0) -> dict:
     }
 
 
-def close_all_apps_on_active_desktop(timeout_seconds: float = 5.0) -> dict:
-    """Gracefully close user-facing windows on the active virtual desktop.
+def _process_name_key(value: str | None) -> str:
+    """Normalize one executable name for exact, case-insensitive matching."""
+    text = str(value or "").strip().casefold().replace("/", "\\")
+    text = text.rsplit("\\", 1)[-1]
+    return text[:-4] if text.endswith(".exe") else text
 
-    Targets come from a top-level window snapshot, never from the process list.
-    Windows shell surfaces, Dexter itself, untitled/invisible windows, and DWM-
-    cloaked windows are excluded. The documented virtual-desktop membership
-    API provides the definitive active-desktop check; failure aborts before any
-    window receives WM_CLOSE.
-    """
-    _require_windows()
-    if timeout_seconds < 0 or timeout_seconds > 60:
-        raise ValueError("timeout_seconds must be between 0 and 60.")
 
+def _active_desktop_window_candidates(
+    process_name_key: str | None = None,
+) -> tuple[list[dict], list[int]]:
+    """Snapshot eligible top-level windows on the active virtual desktop."""
     excluded_pids = {os.getpid()}
     host_pid = str(os.environ.get("DEXTER_HOST_PID") or "").strip()
     if host_pid.isdecimal() and int(host_pid) > 0:
         excluded_pids.add(int(host_pid))
 
-    desktop_filter = "ivirtualdesktopmanager"
-    desktop_filter_warning = None
     try:
         desktop_manager = VirtualDesktopManager()
     except Exception as exc:
@@ -1054,15 +1050,21 @@ def close_all_apps_on_active_desktop(timeout_seconds: float = 5.0) -> dict:
         if pid in excluded_pids:
             return True
 
-        if desktop_manager is not None:
-            try:
-                if not desktop_manager.is_window_on_current_desktop(handle):
-                    return True
-            except Exception:
-                # A membership failure for one unusual window is a reason to
-                # leave that window alone, not to risk another desktop.
-                skipped_desktop_check.append(handle)
+        observed_process_name = _process_name(pid)
+        if (
+            process_name_key is not None
+            and _process_name_key(observed_process_name) != process_name_key
+        ):
+            return True
+
+        try:
+            if not desktop_manager.is_window_on_current_desktop(handle):
                 return True
+        except Exception:
+            # A membership failure for one unusual window is a reason to leave
+            # that window alone, not to risk another desktop.
+            skipped_desktop_check.append(handle)
+            return True
 
         try:
             bounds = _window_bounds(handle)
@@ -1076,7 +1078,7 @@ def close_all_apps_on_active_desktop(timeout_seconds: float = 5.0) -> dict:
                 "hwnd": handle,
                 "title": title,
                 "pid": pid,
-                "process_name": _process_name(pid),
+                "process_name": observed_process_name,
             }
         )
         return True
@@ -1084,8 +1086,18 @@ def close_all_apps_on_active_desktop(timeout_seconds: float = 5.0) -> dict:
     try:
         user32.EnumWindows(EnumWindowsProc(callback), 0)
     finally:
-        if desktop_manager is not None:
-            desktop_manager.close()
+        desktop_manager.close()
+
+    return candidates, skipped_desktop_check
+
+
+def _close_window_candidates(
+    candidates: list[dict],
+    timeout_seconds: float,
+) -> dict:
+    """Send WM_CLOSE to a verified snapshot and report the settled outcome."""
+    if timeout_seconds < 0 or timeout_seconds > 60:
+        raise ValueError("timeout_seconds must be between 0 and 60.")
 
     requested: list[dict] = []
     request_failures: list[dict] = []
@@ -1113,21 +1125,84 @@ def close_all_apps_on_active_desktop(timeout_seconds: float = 5.0) -> dict:
     verified = not remaining and not request_failures
 
     return {
-        "status": "ok",
-        "operation": "close_all_apps",
-        "scope": "active_virtual_desktop",
-        "desktop_filter": desktop_filter,
-        "desktop_filter_warning": desktop_filter_warning,
         "requested_windows": requested,
         "closed_windows": closed,
         "closed_count": len(closed),
         "remaining_windows": remaining,
         "request_failures": request_failures,
-        "skipped_desktop_check": skipped_desktop_check,
         "verified": verified,
         "note": (
             None
             if verified
             else "Some windows remain; an app may be showing a save/confirmation prompt."
         ),
+    }
+
+
+def close_app_windows_on_active_desktop(
+    process_name: str,
+    timeout_seconds: float = 5.0,
+) -> dict:
+    """Gracefully close every visible window for one exact process name.
+
+    Only windows on the active virtual desktop are eligible. The executable
+    suffix is optional, so ``Code`` and ``Code.exe`` are equivalent. Matching
+    stays exact rather than fuzzy: callers should obtain ``process_name`` from
+    ``list_windows`` before closing an app whose executable name is unknown.
+    """
+    _require_windows()
+    if timeout_seconds < 0 or timeout_seconds > 60:
+        raise ValueError("timeout_seconds must be between 0 and 60.")
+    requested_name = str(process_name or "").strip()
+    process_key = _process_name_key(requested_name)
+    if not process_key:
+        raise ValueError("process_name must not be empty.")
+    if len(requested_name) > 260:
+        raise ValueError("process_name must be at most 260 characters.")
+
+    candidates, skipped_desktop_check = _active_desktop_window_candidates(
+        process_key
+    )
+    if not candidates:
+        raise ProcessLookupError(
+            f"No user-facing windows for {requested_name!r} were found on the "
+            "active virtual desktop. Use list_windows to get the exact "
+            "process_name."
+        )
+
+    outcome = _close_window_candidates(candidates, timeout_seconds)
+    return {
+        "status": "ok",
+        "operation": "close_app_windows",
+        "scope": "one_process_name_on_active_virtual_desktop",
+        "process_name": requested_name,
+        "desktop_filter": "ivirtualdesktopmanager",
+        "skipped_desktop_check": skipped_desktop_check,
+        **outcome,
+    }
+
+
+def close_all_apps_on_active_desktop(timeout_seconds: float = 5.0) -> dict:
+    """Gracefully close user-facing windows on the active virtual desktop.
+
+    Targets come from a top-level window snapshot, never from the process list.
+    Windows shell surfaces, Dexter itself, untitled/invisible windows, and DWM-
+    cloaked windows are excluded. The documented virtual-desktop membership
+    API provides the definitive active-desktop check; failure aborts before any
+    window receives WM_CLOSE.
+    """
+    _require_windows()
+    if timeout_seconds < 0 or timeout_seconds > 60:
+        raise ValueError("timeout_seconds must be between 0 and 60.")
+    candidates, skipped_desktop_check = _active_desktop_window_candidates()
+    outcome = _close_window_candidates(candidates, timeout_seconds)
+
+    return {
+        "status": "ok",
+        "operation": "close_all_apps",
+        "scope": "active_virtual_desktop",
+        "desktop_filter": "ivirtualdesktopmanager",
+        "desktop_filter_warning": None,
+        "skipped_desktop_check": skipped_desktop_check,
+        **outcome,
     }

@@ -114,6 +114,19 @@ def _simulate(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return {"closed": True}
     if tool == "close_app":
         return {"process_exited": True, "remaining_windows": 0}
+    if tool == "close_all_windows_for_app":
+        return {
+            "scope": "one_process_name_on_active_virtual_desktop",
+            "process_name": arguments.get("process_name"),
+            "closed_count": 3,
+            "remaining_windows": [],
+        }
+    if tool == "close_every_app_on_active_desktop":
+        return {
+            "scope": "active_virtual_desktop",
+            "closed_count": 3,
+            "remaining_windows": [],
+        }
     if tool == "computer_action":
         action = arguments.get("action")
         if action == "screen_size":

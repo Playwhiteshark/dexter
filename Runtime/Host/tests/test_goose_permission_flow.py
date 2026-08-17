@@ -39,7 +39,7 @@ class GoosePermissionFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_known_operation_is_auto_allowed(self) -> None:
         outcome = await self.goose._request_permission(
             "session",
-            tool("close_all_apps", "close-1"),
+            tool("dexter tools: close every app on active desktop", "close-1"),
             [ALLOW, REJECT],
         )
         self.assertEqual(outcome["outcome"]["optionId"], "allow")

@@ -75,7 +75,8 @@ AUTO_APPROVED_TOOLS = frozenset(
         "set_window_state",
         "close_window",
         "close_app",
-        "close_all_apps",
+        "close_all_windows_for_app",
+        "close_every_app_on_active_desktop",
         "computer_action",
         "find_image",
         "wait_for_image",
@@ -133,9 +134,20 @@ def tool_name_from_call(tool_call: Any) -> str | None:
             continue
         stable = value.split(" · ", 1)[0].strip().casefold()
         normalized = re.sub(r"[^a-z0-9_]+", "_", stable).strip("_")
-        for known in _KNOWN_TOOLS:
-            if normalized == known or normalized.endswith(f"__{known}"):
-                return known
+        candidates = [normalized]
+        if "__" in normalized:
+            candidates.append(normalized.rsplit("__", 1)[-1])
+        # Goose 1.45 may render MCP calls as either
+        # ``dexter_tools__close_all_windows_for_app`` or the humanized title
+        # ``dexter tools: close all windows for app``. The latter normalizes to
+        # a single-underscore server prefix, so handle that exact known prefix
+        # without broadly suffix-matching arbitrary unknown tools.
+        for prefix in ("dexter_tools__", "dexter_tools_"):
+            if normalized.startswith(prefix):
+                candidates.append(normalized[len(prefix):])
+        for candidate in candidates:
+            if candidate in _KNOWN_TOOLS:
+                return candidate
     return None
 
 

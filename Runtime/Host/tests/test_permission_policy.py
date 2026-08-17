@@ -35,10 +35,26 @@ class ToolPermissionPolicyTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_known_tools_auto_approve_and_unknown_tools_ask(self) -> None:
-        known = self.policy.evaluate(call("close_all_apps", "known"))
+        known = self.policy.evaluate(
+            call("close_every_app_on_active_desktop", "known")
+        )
+        humanized = self.policy.evaluate(
+            call("dexter tools: close every app on active desktop", "humanized")
+        )
+        scoped = self.policy.evaluate(
+            call("dexter tools: close all windows for app", "scoped")
+        )
         unknown = self.policy.evaluate(call("future_dangerous_tool", "unknown"))
         self.assertIs(known.decision, PermissionDecision.AUTO_ALLOW)
+        self.assertIs(humanized.decision, PermissionDecision.AUTO_ALLOW)
+        self.assertIs(scoped.decision, PermissionDecision.AUTO_ALLOW)
         self.assertIs(unknown.decision, PermissionDecision.ASK_ONCE)
+
+    def test_humanized_unknown_dexter_tool_still_asks(self) -> None:
+        evaluation = self.policy.evaluate(
+            call("dexter tools: future dangerous tool", "unknown")
+        )
+        self.assertIs(evaluation.decision, PermissionDecision.ASK_ONCE)
 
     def test_new_file_is_trusted_after_success_and_hash_checked(self) -> None:
         target = self.root / "new.txt"

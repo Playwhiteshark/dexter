@@ -1929,7 +1929,7 @@ def mcp_suite() -> list[bool]:
         manager = server.mcp._tool_manager
         tools = manager.list_tools()
         names = [tool.name for tool in tools]
-        check(len(names) == 46, f"expected 46 model-facing tools, got {len(names)}")
+        check(len(names) == 47, f"expected 47 model-facing tools, got {len(names)}")
         check("read_image" in names, "read_image not registered")
         check("write_file" in names, "write_file not registered")
         for expected in (
@@ -1940,7 +1940,8 @@ def mcp_suite() -> list[bool]:
             "restore_workspace",
             "forget_saved",
             "set_window_state",
-            "close_all_apps",
+            "close_all_windows_for_app",
+            "close_every_app_on_active_desktop",
             "web_search",
         ):
             check(expected in names, f"{expected} not registered")
@@ -1968,10 +1969,31 @@ def mcp_suite() -> list[bool]:
                 "note": None,
             },
         ) as mocked:
-            result = server.close_all_apps(3.0)
+            result = server.close_every_app_on_active_desktop(3.0)
         check(result["scope"] == "active_virtual_desktop", f"wrong close-all scope: {result}")
         check(result["closed_count"] == 2, f"close-all count was dropped: {result}")
         mocked.assert_called_once_with(3.0)
+
+    def close_named_app_wrapper_contract():
+        with patch(
+            "server.close_app_windows_on_active_desktop",
+            return_value={
+                "scope": "one_process_name_on_active_virtual_desktop",
+                "process_name": "Code.exe",
+                "closed_count": 2,
+                "remaining_windows": [],
+                "request_failures": [],
+                "skipped_desktop_check": [],
+                "note": None,
+            },
+        ) as mocked:
+            result = server.close_all_windows_for_app("Code.exe", 3.0)
+        check(
+            result["scope"] == "one_process_name_on_active_virtual_desktop",
+            f"wrong named-app scope: {result}",
+        )
+        check(result["closed_count"] == 2, f"named close count was dropped: {result}")
+        mocked.assert_called_once_with("Code.exe", 3.0)
 
     def close_all_filters_other_virtual_desktops():
         class FakeUser32:
@@ -2031,6 +2053,72 @@ def mcp_suite() -> list[bool]:
         check(manager.checked == [101, 102], f"desktop membership was not checked: {manager.checked}")
         check(fake_user32.posted == [101], f"inactive desktop window was closed: {fake_user32.posted}")
         check(result["closed_count"] == 1 and result["verified"], f"unexpected close result: {result}")
+        check(manager.closed, "virtual desktop COM wrapper was not released")
+
+    def close_named_app_filters_process_and_desktop():
+        class FakeUser32:
+            def __init__(self):
+                self.alive = {101, 102, 103}
+                self.posted = []
+
+            @staticmethod
+            def GetShellWindow():
+                return 0
+
+            @staticmethod
+            def IsWindowVisible(_hwnd):
+                return True
+
+            def EnumWindows(self, callback, _lparam):
+                callback(101, 0)
+                callback(102, 0)
+                callback(103, 0)
+                return True
+
+            def IsWindow(self, hwnd):
+                return int(hwnd) in self.alive
+
+            def PostMessageW(self, hwnd, _message, _wparam, _lparam):
+                handle = int(hwnd)
+                self.posted.append(handle)
+                self.alive.discard(handle)
+                return True
+
+        class FakeDesktopManager:
+            def __init__(self):
+                self.checked = []
+                self.closed = False
+
+            def is_window_on_current_desktop(self, hwnd):
+                self.checked.append(hwnd)
+                return hwnd == 101
+
+            def close(self):
+                self.closed = True
+
+        fake_user32 = FakeUser32()
+        manager = FakeDesktopManager()
+        process_names = {
+            10_101: "Code.exe",
+            10_102: "CODE.EXE",
+            10_103: "notepad.exe",
+        }
+        with (
+            patch("windows_tools._require_windows", return_value=None),
+            patch.object(windows_tools, "user32", fake_user32),
+            patch("windows_tools.VirtualDesktopManager", return_value=manager),
+            patch("windows_tools._is_window_cloaked", return_value=False),
+            patch("windows_tools._window_class_name", return_value="TestWindow"),
+            patch("windows_tools._window_title", side_effect=lambda hwnd: f"Window {int(hwnd)}"),
+            patch("windows_tools._window_pid", side_effect=lambda hwnd: 10_000 + int(hwnd)),
+            patch("windows_tools._window_bounds", return_value={"width": 800, "height": 600}),
+            patch("windows_tools._process_name", side_effect=lambda pid: process_names[int(pid)]),
+        ):
+            result = windows_tools.close_app_windows_on_active_desktop("code", 0)
+
+        check(manager.checked == [101, 102], f"non-target app reached desktop check: {manager.checked}")
+        check(fake_user32.posted == [101], f"wrong app/desktop window was closed: {fake_user32.posted}")
+        check(result["closed_count"] == 1 and result["verified"], f"unexpected named close: {result}")
         check(manager.closed, "virtual desktop COM wrapper was not released")
 
     def bounded_web_search_contract():
@@ -2135,8 +2223,10 @@ def mcp_suite() -> list[bool]:
 
     return [
         run_case("MCP: registration + standard annotations", registration_and_annotations),
+        run_case("MCP: named-app close wrapper", close_named_app_wrapper_contract),
         run_case("MCP: active-desktop close-all wrapper", close_all_wrapper_contract),
         run_case("MCP: close-all filters inactive desktops", close_all_filters_other_virtual_desktops),
+        run_case("MCP: named close filters app + inactive desktop", close_named_app_filters_process_and_desktop),
         run_case("MCP: bounded web-search contract", bounded_web_search_contract),
         run_case("MCP: delete-workspace wrapper contract", workspace_delete_wrapper_contract),
         run_case("MCP: workspace app-state wrapper contract", workspace_app_state_wrapper_contract),

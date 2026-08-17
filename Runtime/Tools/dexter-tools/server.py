@@ -60,6 +60,7 @@ from resources import (
 )
 from screen_tools import capture_screenshot, find_image_on_screen, wait_for_image_on_screen
 from windows_tools import (
+    close_app_windows_on_active_desktop,
     close_all_apps_on_active_desktop,
     close_app_gracefully,
     close_window_gracefully,
@@ -445,7 +446,11 @@ def list_windows(
     max_results: int = DEFAULT_WINDOW_RESULTS,
     visible_only: bool = True,
 ) -> dict:
-    """List top-level windows, optionally filtering title/process text."""
+    """List top-level windows, optionally filtering title/process text.
+
+    Use this to obtain an app's exact process_name before
+    close_all_windows_for_app.
+    """
     return agent.windows(list_visible_windows(query, max_results, visible_only))
 
 
@@ -480,7 +485,7 @@ def close_window(hwnd: int, timeout_seconds: float = 5.0) -> dict:
 
 @mcp.tool(annotations=DESTRUCTIVE_LOCAL)
 def close_app(pid: int, timeout_seconds: float = 5.0) -> dict:
-    """Gracefully close a process through its top-level windows; never hard-kills."""
+    """Gracefully close one PID through its top-level windows; never hard-kills."""
     return agent.fields(
         close_app_gracefully(pid, timeout_seconds),
         "process_exited",
@@ -490,11 +495,37 @@ def close_app(pid: int, timeout_seconds: float = 5.0) -> dict:
 
 
 @mcp.tool(annotations=DESTRUCTIVE_LOCAL)
-def close_all_apps(timeout_seconds: float = 5.0) -> dict:
-    """Gracefully close user-facing windows on the active virtual desktop only.
+def close_all_windows_for_app(
+    process_name: str,
+    timeout_seconds: float = 5.0,
+) -> dict:
+    """Close all windows of one named app on the active virtual desktop.
 
-    Dexter and Windows shell surfaces are excluded. Apps may keep a save or
-    confirmation dialog open; no process is hard-killed.
+    Pass the exact process_name from list_windows (the .exe suffix is optional).
+    Use this for every window or instance of one app. Do not use
+    close_every_app_on_active_desktop for a named-app request.
+    """
+    return agent.fields(
+        close_app_windows_on_active_desktop(process_name, timeout_seconds),
+        "scope",
+        "process_name",
+        "closed_count",
+        "remaining_windows",
+        "request_failures",
+        "skipped_desktop_check",
+        "note",
+    )
+
+
+@mcp.tool(annotations=DESTRUCTIVE_LOCAL)
+def close_every_app_on_active_desktop(timeout_seconds: float = 5.0) -> dict:
+    """Close every user-facing app on the active virtual desktop only.
+
+    Use only when the user explicitly asks to close every app on the current
+    desktop. Never use this for all windows or instances of one named app; use
+    close_all_windows_for_app instead. Dexter and Windows shell surfaces are
+    excluded. Apps may keep a save/confirmation dialog open; no process is
+    hard-killed.
     """
     return agent.fields(
         close_all_apps_on_active_desktop(timeout_seconds),

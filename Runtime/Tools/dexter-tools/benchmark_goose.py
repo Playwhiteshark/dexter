@@ -78,6 +78,13 @@ def _fixtures(root: Path) -> list[Case]:
             (ExpectedCall("get_foreground_window"),),
         ),
         Case(
+            "close_named_app_windows",
+            "Close every open VS Code window on the current desktop. There may be "
+            "several Code.exe processes. Use the exact process name Code.exe and do "
+            "not close any other application.",
+            (ExpectedCall("close_all_windows_for_app", {"process_name": "Code.exe"}),),
+        ),
+        Case(
             "webp_vision",
             f"Use read_image from the dexter_tools extension on {red}. If you can see that it is red, "
             "reply with exactly RED on its own line.",

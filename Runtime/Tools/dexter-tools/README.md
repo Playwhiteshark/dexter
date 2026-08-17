@@ -63,7 +63,7 @@ The benchmark uses an isolated Goose data root, `GOOSE_MODE=auto`, and a benchma
 - Model-provided app arguments are accepted only through an explicitly configured alias whose policy allows them; dynamically discovered apps are name-only launches.
 - `open_file` blocks executable/script/shortcut extensions so it cannot bypass the app allowlist.
 - `open_url` accepts only HTTP/HTTPS.
-- Window closing is graceful; neither `close_app` nor `close_all_apps` hard-kills processes. `close_all_apps` snapshots titled, visible user-facing windows rather than deriving targets from the process list, excludes Dexter and Windows shell surfaces, and limits targets to the active Windows virtual desktop. If Windows cannot verify virtual-desktop membership, the operation fails before closing anything.
+- Window closing is graceful; `close_app`, `close_all_windows_for_app`, and `close_every_app_on_active_desktop` never hard-kill processes. `close_all_windows_for_app(process_name)` closes every visible window for one exact process name on the active Windows virtual desktop; it is the scoped choice for requests such as “close every VS Code window.” `close_every_app_on_active_desktop` is reserved for an explicit request to close every app. Both desktop-scoped tools snapshot titled user-facing windows, exclude Dexter and Windows shell surfaces, and fail before closing anything if Windows cannot verify virtual-desktop membership.
 - PyAutoGUI's corner fail-safe remains enabled.
 - Repeating click jobs are cancellable and can have run/time/visual stop conditions.
 
