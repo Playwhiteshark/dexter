@@ -63,9 +63,15 @@ The benchmark uses an isolated Goose data root, `GOOSE_MODE=auto`, and a benchma
 - Model-provided app arguments are accepted only through an explicitly configured alias whose policy allows them; dynamically discovered apps are name-only launches.
 - `open_file` blocks executable/script/shortcut extensions so it cannot bypass the app allowlist.
 - `open_url` accepts only HTTP/HTTPS.
-- Window closing is graceful; `close_app` does not hard-kill processes.
+- Window closing is graceful; neither `close_app` nor `close_all_apps` hard-kills processes. `close_all_apps` snapshots titled, visible user-facing windows rather than deriving targets from the process list, excludes Dexter and Windows shell surfaces, and limits targets to the active Windows virtual desktop. If Windows cannot verify virtual-desktop membership, the operation fails before closing anything.
 - PyAutoGUI's corner fail-safe remains enabled.
 - Repeating click jobs are cancellable and can have run/time/visual stop conditions.
+
+The Host owns the approval policy above Goose's `smart_approve` requests. Every current tool is classified explicitly and future tools default to Ask. Ordinary reads and computer operations are automatically allowed. `write_file`, plus `screenshot(..., overwrite=True)` for an existing target, asks once per file per chat. Files created by Dexter in the current chat are trusted automatically. After each successful write the Host records the expected SHA-256; an out-of-band change revokes silent trust and asks again. Clear Chat removes all file trust.
+
+## Compact web search
+
+`web_search(query)` returns at most five records containing only `title`, `url`, and a bounded `snippet`. It uses DDGS backends one at a time with a fixed timeout and filters non-HTTP(S) URLs. It does not fetch result pages or expose an arbitrary crawler. Install/update the tool environment with `install_requirements.ps1` to add the `ddgs` dependency.
 
 ## Persistent computer map and workspaces
 
@@ -108,7 +114,7 @@ Provider-aware startup waiting is designed for splash/launcher applications. For
 
 This stage does not yet snapshot application-internal state. Browser tabs, Explorer folder identity, VS Code project/editor state without an already saved resource, Terminal tabs/profiles/directories, unsaved documents, and arbitrary application command lines are not inferred from window titles. Those belong in app-specific capture/restore providers rather than the model prompt or generic window layer.
 
-Virtual-desktop orchestration is deliberately not implemented in this version. DWM-cloaked windows are omitted from capture, but Dexter does not enumerate, name, create, switch, or assign Windows virtual desktops yet.
+Virtual-desktop orchestration is deliberately not implemented in this version. DWM-cloaked windows are omitted from capture. Bulk close uses the documented `IVirtualDesktopManager::IsWindowOnCurrentVirtualDesktop` membership check so windows on other desktops are left alone, but Dexter does not enumerate, name, create, switch, or assign Windows virtual desktops.
 
 ### Why these are normal tools, not dynamically exposed tools
 
@@ -120,7 +126,7 @@ This avoids turning saved projects into separate tool definitions and keeps reso
 
 `remember_resource` can store an explicit HTTP/HTTPS URL now, but Dexter does not yet have a reliable primitive for reading the active Brave/Chrome tab URL. Do not infer URLs from browser window titles. A future browser-context adapter can make requests such as "remember this tab as Fleckle" deterministic.
 
-Windows virtual desktops are also intentionally deferred. The current workspace snapshot is scoped to non-cloaked user-facing top-level windows. A future virtual-desktop module can build on documented per-window desktop identity/move APIs, but desktop enumeration/naming/switching should not be implemented through undocumented shell interfaces without a separate decision and regression coverage.
+The current workspace snapshot is scoped to non-cloaked user-facing top-level windows. The small virtual-desktop module is membership-only and exists for active-desktop bulk closing; desktop enumeration/naming/switching remains deferred and must not be implemented through undocumented shell interfaces without a separate decision and regression coverage.
 
 ### Steam workspace reopening
 

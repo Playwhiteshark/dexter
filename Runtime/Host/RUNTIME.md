@@ -18,3 +18,8 @@ created.
 
 Typed prompts are available at the bottom of the overlay. Enter or the Send
 button submits a single-line prompt through the same Goose ACP session as voice.
+
+The Host also owns Dexter's per-chat tool approval policy. Classified Dexter
+tools are auto-approved, unknown future tools default to Ask, and pre-existing
+file writes use path-specific, SHA-256-verified trust that is cleared with the
+chat. Approval decisions are never persisted outside the ACP chat.

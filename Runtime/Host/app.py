@@ -1,16 +1,18 @@
 """Dexter local host: PTT/STT + overlay + persistent Goose ACP session.
 
-Stage 4A:
+Runtime:
 - VoiceInput owns Ctrl+/ and Moonshine.
 - Qt owns presentation/tray.
 - GooseACP owns one ``goose acp`` child process + persistent session.
 - Finalized speech is sent to Goose.
 - AgentMessageChunk text streams into the Dexter response card.
-- Permission requests are cancelled until Stage 4B wires the approval UI.
+- Dexter's own permission policy auto-approves classified computer actions and
+  keeps exceptional file approvals inside the Host UI.
 """
 
 from __future__ import annotations
 
+import os
 import signal
 import sys
 import threading
@@ -71,6 +73,10 @@ class RuntimeQtBridge(QObject):
 class DexterHost:
     def __init__(self, app: QApplication) -> None:
         self.app = app
+        # Goose and the MCP child inherit this marker.  It lets bulk desktop
+        # actions exclude Dexter's own top-level window without excluding every
+        # unrelated Python application.
+        os.environ["DEXTER_HOST_PID"] = str(os.getpid())
         self.overlay = DexterOverlay()
 
         self.voice_bridge = VoiceQtBridge()

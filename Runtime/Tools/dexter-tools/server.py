@@ -60,6 +60,7 @@ from resources import (
 )
 from screen_tools import capture_screenshot, find_image_on_screen, wait_for_image_on_screen
 from windows_tools import (
+    close_all_apps_on_active_desktop,
     close_app_gracefully,
     close_window_gracefully,
     focus_window_verified,
@@ -74,6 +75,7 @@ from workspace_tools import (
     save_workspace as save_current_workspace,
     search_workspaces,
 )
+from web_search import search_web
 
 
 READ_ONLY_LOCAL = ToolAnnotations(
@@ -104,6 +106,12 @@ OPEN_WORLD = ToolAnnotations(
     read_only_hint=False,
     destructive_hint=False,
     idempotent_hint=False,
+    open_world_hint=True,
+)
+READ_ONLY_OPEN_WORLD = ToolAnnotations(
+    read_only_hint=True,
+    destructive_hint=False,
+    idempotent_hint=True,
     open_world_hint=True,
 )
 
@@ -393,6 +401,12 @@ def open_url(url: str) -> dict:
     return {"opened": bool(result.get("browser_accepted_request", False))}
 
 
+@mcp.tool(annotations=READ_ONLY_OPEN_WORLD)
+def web_search(query: str) -> dict:
+    """Search the web and return up to five compact title/URL/snippet results."""
+    return agent.fields(search_web(query), "results")
+
+
 # Clipboard / processes / windows -------------------------------------------
 
 @mcp.tool(annotations=READ_ONLY_LOCAL)
@@ -471,6 +485,26 @@ def close_app(pid: int, timeout_seconds: float = 5.0) -> dict:
         close_app_gracefully(pid, timeout_seconds),
         "process_exited",
         "remaining_windows",
+        "note",
+    )
+
+
+@mcp.tool(annotations=DESTRUCTIVE_LOCAL)
+def close_all_apps(timeout_seconds: float = 5.0) -> dict:
+    """Gracefully close user-facing windows on the active virtual desktop only.
+
+    Dexter and Windows shell surfaces are excluded. Apps may keep a save or
+    confirmation dialog open; no process is hard-killed.
+    """
+    return agent.fields(
+        close_all_apps_on_active_desktop(timeout_seconds),
+        "scope",
+        "desktop_filter",
+        "desktop_filter_warning",
+        "closed_count",
+        "remaining_windows",
+        "request_failures",
+        "skipped_desktop_check",
         "note",
     )
 

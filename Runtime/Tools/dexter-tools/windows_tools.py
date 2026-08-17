@@ -7,6 +7,11 @@ from ctypes import wintypes
 
 import psutil
 
+from virtual_desktop import VirtualDesktopManager
+
+
+_WIN_CALLBACK = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)
+
 
 if os.name == "nt":
     user32 = ctypes.windll.user32
@@ -42,6 +47,19 @@ if os.name == "nt":
         user32.EndDeferWindowPos.argtypes = [wintypes.HANDLE]
         user32.EndDeferWindowPos.restype = wintypes.BOOL
         user32.GetShellWindow.restype = wintypes.HWND
+        user32.PostMessageW.argtypes = [
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        ]
+        user32.PostMessageW.restype = wintypes.BOOL
+        user32.GetClassNameW.argtypes = [
+            wintypes.HWND,
+            wintypes.LPWSTR,
+            ctypes.c_int,
+        ]
+        user32.GetClassNameW.restype = ctypes.c_int
     except Exception:
         pass
 
@@ -71,6 +89,9 @@ GWL_STYLE = -16
 WS_THICKFRAME = 0x00040000
 WINDOW_SETTLE_SECONDS = 0.08
 GEOMETRY_ATTEMPTS = 3
+SHELL_WINDOW_CLASSES = frozenset(
+    {"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"}
+)
 
 
 class WINDOWPLACEMENT(ctypes.Structure):
@@ -150,6 +171,12 @@ def _window_pid(hwnd: int) -> int:
     pid = wintypes.DWORD()
     user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
     return int(pid.value)
+
+
+def _window_class_name(hwnd: int) -> str:
+    buffer = ctypes.create_unicode_buffer(256)
+    copied = user32.GetClassNameW(hwnd, buffer, len(buffer))
+    return buffer.value if copied else ""
 
 
 def _rect_dict(rect: wintypes.RECT) -> dict:
@@ -967,5 +994,140 @@ def close_app_gracefully(pid: int, timeout_seconds: float = 5.0) -> dict:
             None
             if process_exited or not remaining_windows
             else "App did not close; it may be showing a save/confirmation prompt."
+        ),
+    }
+
+
+def close_all_apps_on_active_desktop(timeout_seconds: float = 5.0) -> dict:
+    """Gracefully close user-facing windows on the active virtual desktop.
+
+    Targets come from a top-level window snapshot, never from the process list.
+    Windows shell surfaces, Dexter itself, untitled/invisible windows, and DWM-
+    cloaked windows are excluded. The documented virtual-desktop membership
+    API provides the definitive active-desktop check; failure aborts before any
+    window receives WM_CLOSE.
+    """
+    _require_windows()
+    if timeout_seconds < 0 or timeout_seconds > 60:
+        raise ValueError("timeout_seconds must be between 0 and 60.")
+
+    excluded_pids = {os.getpid()}
+    host_pid = str(os.environ.get("DEXTER_HOST_PID") or "").strip()
+    if host_pid.isdecimal() and int(host_pid) > 0:
+        excluded_pids.add(int(host_pid))
+
+    desktop_filter = "ivirtualdesktopmanager"
+    desktop_filter_warning = None
+    try:
+        desktop_manager = VirtualDesktopManager()
+    except Exception as exc:
+        # Bulk closing must fail closed if active-desktop membership cannot be
+        # verified. DWM cloaking remains a useful extra filter but is not used
+        # as the sole authorization to touch other applications.
+        raise RuntimeError(
+            "Could not verify the active Windows virtual desktop; no windows "
+            f"were closed ({type(exc).__name__}: {exc})."
+        ) from exc
+
+    candidates: list[dict] = []
+    skipped_desktop_check: list[int] = []
+    shell_hwnd = int(user32.GetShellWindow() or 0)
+    EnumWindowsProc = _WIN_CALLBACK(
+        wintypes.BOOL,
+        wintypes.HWND,
+        wintypes.LPARAM,
+    )
+
+    def callback(hwnd, _lparam):
+        handle = int(hwnd)
+        if shell_hwnd and handle == shell_hwnd:
+            return True
+        if not user32.IsWindowVisible(hwnd) or _is_window_cloaked(handle):
+            return True
+        if _window_class_name(handle) in SHELL_WINDOW_CLASSES:
+            return True
+
+        title = _window_title(handle).strip()
+        if not title:
+            return True
+        pid = _window_pid(handle)
+        if pid in excluded_pids:
+            return True
+
+        if desktop_manager is not None:
+            try:
+                if not desktop_manager.is_window_on_current_desktop(handle):
+                    return True
+            except Exception:
+                # A membership failure for one unusual window is a reason to
+                # leave that window alone, not to risk another desktop.
+                skipped_desktop_check.append(handle)
+                return True
+
+        try:
+            bounds = _window_bounds(handle)
+        except RuntimeError:
+            return True
+        if bounds["width"] <= 0 or bounds["height"] <= 0:
+            return True
+
+        candidates.append(
+            {
+                "hwnd": handle,
+                "title": title,
+                "pid": pid,
+                "process_name": _process_name(pid),
+            }
+        )
+        return True
+
+    try:
+        user32.EnumWindows(EnumWindowsProc(callback), 0)
+    finally:
+        if desktop_manager is not None:
+            desktop_manager.close()
+
+    requested: list[dict] = []
+    request_failures: list[dict] = []
+    for item in candidates:
+        hwnd = item["hwnd"]
+        if not user32.IsWindow(hwnd):
+            continue
+        if user32.PostMessageW(hwnd, WM_CLOSE, 0, 0):
+            requested.append(item)
+        else:
+            request_failures.append({**item, "error": "WM_CLOSE was rejected"})
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if not any(user32.IsWindow(item["hwnd"]) for item in requested):
+            break
+        time.sleep(0.10)
+
+    remaining = [
+        item for item in requested if user32.IsWindow(item["hwnd"])
+    ]
+    closed = [
+        item for item in requested if not user32.IsWindow(item["hwnd"])
+    ]
+    verified = not remaining and not request_failures
+
+    return {
+        "status": "ok",
+        "operation": "close_all_apps",
+        "scope": "active_virtual_desktop",
+        "desktop_filter": desktop_filter,
+        "desktop_filter_warning": desktop_filter_warning,
+        "requested_windows": requested,
+        "closed_windows": closed,
+        "closed_count": len(closed),
+        "remaining_windows": remaining,
+        "request_failures": request_failures,
+        "skipped_desktop_check": skipped_desktop_check,
+        "verified": verified,
+        "note": (
+            None
+            if verified
+            else "Some windows remain; an app may be showing a save/confirmation prompt."
         ),
     }

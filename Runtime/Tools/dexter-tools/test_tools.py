@@ -78,7 +78,7 @@ def environment_suite() -> list[bool]:
     def import_smoke():
         # This catches the exact class of startup failure previously caused by
         # corrupted NumPy source files.
-        for module in ("numpy", "cv2", "pyautogui", "mcp", "PIL"):
+        for module in ("numpy", "cv2", "pyautogui", "mcp", "PIL", "ddgs"):
             importlib.import_module(module)
         importlib.import_module("server")
 
@@ -1914,12 +1914,22 @@ def mcp_suite() -> list[bool]:
     root = reset_test_root()
     _configure_root(root)
     import server
+    import web_search as web_search_module
+    import windows_tools
+
+    repo_root = Path(__file__).resolve().parents[3]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    from Runtime.Host.permission_policy import (
+        AUTO_APPROVED_TOOLS,
+        FILE_WRITE_TARGETS,
+    )
 
     def registration_and_annotations():
         manager = server.mcp._tool_manager
         tools = manager.list_tools()
         names = [tool.name for tool in tools]
-        check(len(names) == 44, f"expected 44 model-facing tools, got {len(names)}")
+        check(len(names) == 46, f"expected 46 model-facing tools, got {len(names)}")
         check("read_image" in names, "read_image not registered")
         check("write_file" in names, "write_file not registered")
         for expected in (
@@ -1930,11 +1940,132 @@ def mcp_suite() -> list[bool]:
             "restore_workspace",
             "forget_saved",
             "set_window_state",
+            "close_all_apps",
+            "web_search",
         ):
             check(expected in names, f"{expected} not registered")
         check("dexter_ping" not in names, "dexter_ping should be replaced by read_image")
         for tool in tools:
             check(tool.annotations is not None, f"missing annotations: {tool.name}")
+        classified = AUTO_APPROVED_TOOLS | FILE_WRITE_TARGETS.keys()
+        check(
+            set(names) == classified,
+            f"permission policy classification differs from live tools: "
+            f"missing={set(names) - classified}, stale={classified - set(names)}",
+        )
+
+    def close_all_wrapper_contract():
+        with patch(
+            "server.close_all_apps_on_active_desktop",
+            return_value={
+                "scope": "active_virtual_desktop",
+                "desktop_filter": "ivirtualdesktopmanager",
+                "desktop_filter_warning": None,
+                "closed_count": 2,
+                "remaining_windows": [],
+                "request_failures": [],
+                "skipped_desktop_check": [],
+                "note": None,
+            },
+        ) as mocked:
+            result = server.close_all_apps(3.0)
+        check(result["scope"] == "active_virtual_desktop", f"wrong close-all scope: {result}")
+        check(result["closed_count"] == 2, f"close-all count was dropped: {result}")
+        mocked.assert_called_once_with(3.0)
+
+    def close_all_filters_other_virtual_desktops():
+        class FakeUser32:
+            def __init__(self):
+                self.alive = {101, 102}
+                self.posted = []
+
+            @staticmethod
+            def GetShellWindow():
+                return 0
+
+            @staticmethod
+            def IsWindowVisible(_hwnd):
+                return True
+
+            def EnumWindows(self, callback, _lparam):
+                callback(101, 0)
+                callback(102, 0)
+                return True
+
+            def IsWindow(self, hwnd):
+                return int(hwnd) in self.alive
+
+            def PostMessageW(self, hwnd, _message, _wparam, _lparam):
+                handle = int(hwnd)
+                self.posted.append(handle)
+                self.alive.discard(handle)
+                return True
+
+        class FakeDesktopManager:
+            def __init__(self):
+                self.checked = []
+                self.closed = False
+
+            def is_window_on_current_desktop(self, hwnd):
+                self.checked.append(hwnd)
+                return hwnd == 101
+
+            def close(self):
+                self.closed = True
+
+        fake_user32 = FakeUser32()
+        manager = FakeDesktopManager()
+        with (
+            patch("windows_tools._require_windows", return_value=None),
+            patch.object(windows_tools, "user32", fake_user32),
+            patch("windows_tools.VirtualDesktopManager", return_value=manager),
+            patch("windows_tools._is_window_cloaked", return_value=False),
+            patch("windows_tools._window_class_name", return_value="TestWindow"),
+            patch("windows_tools._window_title", side_effect=lambda hwnd: f"Window {int(hwnd)}"),
+            patch("windows_tools._window_pid", side_effect=lambda hwnd: 10_000 + int(hwnd)),
+            patch("windows_tools._window_bounds", return_value={"width": 800, "height": 600}),
+            patch("windows_tools._process_name", return_value="test.exe"),
+        ):
+            result = windows_tools.close_all_apps_on_active_desktop(0)
+
+        check(manager.checked == [101, 102], f"desktop membership was not checked: {manager.checked}")
+        check(fake_user32.posted == [101], f"inactive desktop window was closed: {fake_user32.posted}")
+        check(result["closed_count"] == 1 and result["verified"], f"unexpected close result: {result}")
+        check(manager.closed, "virtual desktop COM wrapper was not released")
+
+    def bounded_web_search_contract():
+        class FakeDDGS:
+            def __init__(self, timeout):
+                check(timeout == web_search_module.SEARCH_TIMEOUT_SECONDS, "wrong search timeout")
+
+            def text(self, query, **kwargs):
+                check(query == "Dexter release", "query changed")
+                check(kwargs["max_results"] == 5, "search result bound changed")
+                return [
+                    {
+                        "title": "  Dexter   Release  ",
+                        "href": "https://example.com/release",
+                        "body": " compact   snippet ",
+                    },
+                    {
+                        "title": "Unsafe",
+                        "href": "javascript:alert(1)",
+                        "body": "must be removed",
+                    },
+                ]
+
+        with patch.object(web_search_module, "DDGS", FakeDDGS):
+            result = web_search_module.search_web("Dexter release")
+        check(
+            result["results"] == [
+                {
+                    "title": "Dexter Release",
+                    "url": "https://example.com/release",
+                    "snippet": "compact snippet",
+                }
+            ],
+            f"web results were not compact/filtered: {result}",
+        )
 
     def workspace_delete_wrapper_contract():
         with patch(
@@ -2004,6 +2135,9 @@ def mcp_suite() -> list[bool]:
 
     return [
         run_case("MCP: registration + standard annotations", registration_and_annotations),
+        run_case("MCP: active-desktop close-all wrapper", close_all_wrapper_contract),
+        run_case("MCP: close-all filters inactive desktops", close_all_filters_other_virtual_desktops),
+        run_case("MCP: bounded web-search contract", bounded_web_search_contract),
         run_case("MCP: delete-workspace wrapper contract", workspace_delete_wrapper_contract),
         run_case("MCP: workspace app-state wrapper contract", workspace_app_state_wrapper_contract),
         run_case("MCP: corrupt-image recovery contract", image_failure_does_not_return_image_content),

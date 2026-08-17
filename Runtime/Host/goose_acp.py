@@ -1,11 +1,12 @@
 """Persistent Goose ACP client for the Dexter host.
 
-Stage 4A responsibilities only:
+Runtime responsibilities:
 - spawn one local ``goose acp`` process over stdio;
 - initialize ACP and create one persistent Goose session;
 - accept finalized text prompts through a FIFO;
 - stream agent text chunks back through callbacks;
-- cancel any permission request until Stage 4B wires the approval UI.
+- apply Dexter's explicit per-chat permission policy and bridge exceptional
+  approval requests to the Host UI.
 
 No Qt imports live here. The host is responsible for marshalling callbacks onto
 the GUI thread.
@@ -25,6 +26,11 @@ from typing import Any, Callable
 
 from acp import PROTOCOL_VERSION, spawn_agent_process, text_block
 from acp.interfaces import Client
+
+from Runtime.Host.permission_policy import (
+    PermissionDecision,
+    ToolPermissionPolicy,
+)
 
 
 class GooseState(str, Enum):
@@ -89,7 +95,7 @@ class GooseACP:
     """One persistent local Goose ACP process and session."""
 
     _STOP = object()
-    _ALLOW_CHAT_ID = "__dexter_allow_this_chat__"
+    _ALLOW_FILE_ID = "__dexter_allow_file_this_chat__"
 
     def __init__(
         self,
@@ -129,9 +135,10 @@ class GooseACP:
         # UI selections are marshalled onto that loop with call_soon_threadsafe.
         self._permission_future: asyncio.Future | None = None
         self._permission_option_ids: set[str] = set()
-        self._permission_scope_key: str | None = None
         self._permission_allow_once_id: str | None = None
-        self._session_allowed_scopes: set[str] = set()
+        self._permission_file_path: Path | None = None
+        self._permission_tool_call_id: str | None = None
+        self._permission_policy = ToolPermissionPolicy(self.cwd)
 
         self._started = threading.Event()
         self._stopped = threading.Event()
@@ -229,10 +236,10 @@ class GooseACP:
         )
         self._session_id = session.session_id
 
-        # Dexter's "Always allow this chat" memory lives only here.
-        self._session_allowed_scopes.clear()
-        self._permission_scope_key = None
+        self._permission_policy.reset()
         self._permission_allow_once_id = None
+        self._permission_file_path = None
+        self._permission_tool_call_id = None
 
     def _new_chat_done(self, future) -> None:
         try:
@@ -438,6 +445,8 @@ class GooseACP:
         if self._session_id is not None and session_id != self._session_id:
             return
 
+        self._permission_policy.observe_tool_update(update)
+
         # Goose 1.45.0 + ACP v1 emitted AgentMessageChunk in the compatibility
         # probe. Match the protocol discriminator too so this remains tolerant
         # of generated-class naming changes within the same schema.
@@ -456,17 +465,6 @@ class GooseACP:
         if "." in text:
             text = text.rsplit(".", 1)[-1]
         return text
-
-    @staticmethod
-    def _permission_scope(tool_call) -> str:
-        """Best stable per-tool key available in ACP v1's permission payload."""
-        title = str(getattr(tool_call, "title", "") or "").strip()
-        # Goose's Dexter tool titles use a middle-dot suffix for the target
-        # path/value. Strip that volatile portion so e.g. create_directory is
-        # remembered independently of the specific directory.
-        stable_title = title.split(" · ", 1)[0].strip().casefold()
-        kind = str(getattr(tool_call, "kind", "") or "").strip().casefold()
-        return f"{kind}|{stable_title}"
 
     @staticmethod
     def _selected_outcome(option_id: str):
@@ -516,16 +514,9 @@ class GooseACP:
 
         allow_once = actual.get("allow_once")
         reject_once = actual.get("reject_once")
-        scope_key = self._permission_scope(tool_call)
+        evaluation = self._permission_policy.evaluate(tool_call)
 
-        # "Always allow this chat" is intentionally Dexter-local. We never send
-        # Goose's protocol-level allow_always here, because ACP describes it as
-        # remembered without defining a persistence scope. Reusing allow_once
-        # gives us guaranteed session-only behavior.
-        if (
-            scope_key in self._session_allowed_scopes
-            and allow_once is not None
-        ):
+        if evaluation.decision is PermissionDecision.AUTO_ALLOW and allow_once:
             return self._selected_outcome(allow_once.option_id)
 
         choices: list[PermissionChoice] = []
@@ -545,13 +536,14 @@ class GooseACP:
                     kind="allow_once",
                 )
             )
-            choices.append(
-                PermissionChoice(
-                    option_id=self._ALLOW_CHAT_ID,
-                    label="Always allow this chat",
-                    kind="allow_session",
+            if evaluation.decision is PermissionDecision.ASK_FILE:
+                choices.append(
+                    PermissionChoice(
+                        option_id=self._ALLOW_FILE_ID,
+                        label="Allow this file for this chat",
+                        kind="allow_file",
+                    )
                 )
-            )
 
         if not choices:
             self._emit_error(
@@ -603,10 +595,13 @@ class GooseACP:
         self._permission_option_ids = {
             choice.option_id for choice in choices
         }
-        self._permission_scope_key = scope_key
         self._permission_allow_once_id = (
             allow_once.option_id if allow_once is not None else None
         )
+        self._permission_file_path = evaluation.file_path
+        self._permission_tool_call_id = str(
+            getattr(tool_call, "tool_call_id", "") or ""
+        ).strip() or None
 
         self._emit(self._on_permission_request, request)
 
@@ -616,8 +611,9 @@ class GooseACP:
             if self._permission_future is future:
                 self._permission_future = None
                 self._permission_option_ids.clear()
-                self._permission_scope_key = None
                 self._permission_allow_once_id = None
+                self._permission_file_path = None
+                self._permission_tool_call_id = None
             self._emit(self._on_permission_cleared)
 
     def _resolve_permission_on_loop(self, option_id: str) -> None:
@@ -631,16 +627,19 @@ class GooseACP:
             )
             return
 
-        if option_id == self._ALLOW_CHAT_ID:
-            scope_key = self._permission_scope_key
+        if option_id == self._ALLOW_FILE_ID:
+            file_path = self._permission_file_path
             allow_once_id = self._permission_allow_once_id
-            if not scope_key or not allow_once_id:
+            if file_path is None or not allow_once_id:
                 self._emit_error(
-                    "Session-scoped permission could not be resolved safely."
+                    "File-scoped permission could not be resolved safely."
                 )
                 return
 
-            self._session_allowed_scopes.add(scope_key)
+            self._permission_policy.approve_file_for_chat(
+                file_path,
+                self._permission_tool_call_id,
+            )
             future.set_result(self._selected_outcome(allow_once_id))
             return
 
