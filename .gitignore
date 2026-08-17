@@ -83,3 +83,21 @@ Runtime/Voice/__pycache__/
 Thumbs.db
 Runtime/Host/.venv/
 Runtime/Host/__pycache__/
+
+# Dexter local/generated development artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# One-off local diagnostic outputs
+/goose_ollama_capture/
+/personality_probe_results_*.json
+/prompt_endpoint_matrix_*.json
+/tools_style_probe_catalog_*.json
+/tools_style_probe_results_*.json
+
+# Patch-delivery archives belong outside the source tree
+/dexter_workspace_*.zip
+/dexter_operational_memory_workspace_update_*.zip
