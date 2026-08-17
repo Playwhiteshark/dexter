@@ -8,7 +8,7 @@ Deterministic local-computer tools for Dexter. The direct tool catalog remains i
 - `read_image(path)` is the single model-facing image loader. Pillow identifies the content, applies EXIF orientation, uses the first animation frame, fully decodes it, then emits static PNG bytes.
 - Corrupt/unsafe images fail before MCP image content is created, preventing the provider-poisoned-session failure mode.
 - Normal model-facing limits are smaller: directory 50, file search 25, content search 20 / 3 per file, reads 160 lines / 12k chars, clipboard 10k, processes/windows 30.
-- Machine-specific roots and app aliases live in ignored `local_config.py`; copy `local_config.example.py` once on each machine.
+- Machine-specific roots and optional app-alias overrides live in ignored `local_config.py`; ordinary installed Windows apps are discovered automatically by `open_app`.
 - `schema_audit.py` measures the live MCP catalog instead of maintaining a duplicate schema catalog.
 - `test_tools.py` includes dependency/import smoke tests, filesystem/result contracts, image regressions, background-job tests, MCP registration checks and multi-tool chains.
 - `benchmark_server.py` + `benchmark_goose.py` provide an automated real-Goose/Gemma selection benchmark while simulating effectful tools.
@@ -29,7 +29,7 @@ From the `dexter-tools` directory:
 Copy-Item .\local_config.example.py .\local_config.py
 ```
 
-Then edit `local_config.py` for this machine. The committed example is deny-by-default and contains no user-specific paths. `local_config.py` is ignored by Git; keep filesystem roots narrow and add only explicitly trusted app aliases.
+Then edit `local_config.py` for this machine. The committed example is deny-by-default and contains no user-specific paths. `local_config.py` is ignored by Git; keep filesystem roots narrow. `APP_ALIASES` is now only for trusted overrides, special targets, or apps that need fixed trusted arguments; normal installed apps do not need entries.
 
 ## Deterministic validation
 
@@ -59,8 +59,8 @@ The benchmark uses an isolated Goose data root, `GOOSE_MODE=auto`, and a benchma
 - Path resolution and recursive walking avoid traversing links/junctions outside allowed roots.
 - Copy/move/rename refuse overwrite and retain deterministic postcondition verification.
 - `delete_file` uses the Recycle Bin; permanent deletion is not exposed to the model.
-- `open_app` accepts only configured aliases and never invokes a shell.
-- App arguments are denied by default.
+- `open_app` resolves configured aliases first, then strongly/uniquely matches the current user's Windows Start app catalog and Start Menu shortcuts. It never searches arbitrary executables or constructs a shell command.
+- Model-provided app arguments are accepted only through an explicitly configured alias whose policy allows them; dynamically discovered apps are name-only launches.
 - `open_file` blocks executable/script/shortcut extensions so it cannot bypass the app allowlist.
 - `open_url` accepts only HTTP/HTTPS.
 - Window closing is graceful; `close_app` does not hard-kill processes.
@@ -81,6 +81,12 @@ The model-facing catalog now includes a small persistent operational-memory laye
 Operational memory is stored outside the repository by default at `%LOCALAPPDATA%\Dexter\state\computer_memory.json`. This is intentionally separate from conversation history and future biographical/profile memory. `STATE_DIR` may be overridden in ignored `local_config.py`.
 
 Resource paths remain subject to `ALLOWED_ROOTS`. Saving a resource does not create a new filesystem permission boundary.
+
+### Installed app discovery
+
+`open_app(name)` no longer requires one alias per application. Explicit `APP_ALIASES` entries are checked first as deterministic overrides. Otherwise Dexter builds a small in-process index from the current user's Windows Start app catalog (`Get-StartApps`) plus per-user/all-user Start Menu shortcuts, resolves only a strong unique name match, and launches that OS-provided entry. The fixed discovery command contains no model text. The index is cached briefly and refreshed automatically after a miss, so newly installed applications become available without maintaining a permanent app database. Ambiguous names fail with a short list of candidates instead of guessing. No additional MCP tool is exposed; requests such as "open OMEN Gaming Hub" remain a single `open_app` call.
+
+Discovered apps intentionally do not accept model-provided command-line arguments. Apps requiring fixed trusted arguments or unusual launch targets should still use `APP_ALIASES` or a purpose-built internal provider.
 
 ### Development-project launch aliases
 

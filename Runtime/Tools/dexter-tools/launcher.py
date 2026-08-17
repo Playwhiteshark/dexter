@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 import psutil
 
+from app_discovery import launch_installed_app, resolve_installed_app
 from config import APP_ALIASES, DANGEROUS_OPEN_FILE_EXTENSIONS
 from filesystem import resolve_allowed_path
 
@@ -113,15 +114,46 @@ def _launch_configured_app(
     }
 
 
+def _has_configured_app_alias(name: str) -> bool:
+    if not isinstance(name, str) or not name.strip():
+        return False
+    key = name.strip().casefold()
+    return any(alias.casefold() == key for alias in APP_ALIASES)
+
+
 def launch_app(
     name: str,
     arguments: list[str] | None = None,
 ) -> dict:
-    return _launch_configured_app(
-        name,
-        arguments,
-        require_argument_permission=True,
-    )
+    """Launch a configured override alias or a strongly matched installed app.
+
+    Explicit APP_ALIASES remain authoritative and retain their argument policy.
+    Ordinary installed applications are discovered internally from Windows'
+    Start app catalog / Start Menu, so the model never needs executable paths or
+    a manually curated alias for every application.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("App name must be a non-empty string.")
+
+    if _has_configured_app_alias(name):
+        result = _launch_configured_app(
+            name,
+            arguments,
+            require_argument_permission=True,
+        )
+        result["app"] = name.strip()
+        result["matched_name"] = name.strip()
+        result["source"] = "configured_alias"
+        return result
+
+    if arguments:
+        raise PermissionError(
+            "Arguments are allowed only for an explicitly configured APP_ALIASES entry. "
+            "Ordinary installed apps may be opened by name without arguments."
+        )
+
+    candidate = resolve_installed_app(name)
+    return launch_installed_app(candidate)
 
 
 def launch_app_with_trusted_arguments(

@@ -361,15 +361,15 @@ def forget_saved(
 
 @mcp.tool(annotations=READ_ONLY_LOCAL)
 def list_app_aliases() -> dict:
-    """List configured aliases accepted by open_app."""
+    """List optional configured open_app aliases/overrides; ordinary installed apps need no alias."""
     return agent.fields(list_app_aliases_configured(), "aliases")
 
 
 @mcp.tool(annotations=WRITE_LOCAL)
 def open_app(name: str, arguments: list[str] | None = None) -> dict:
-    """Launch a configured app alias without invoking a shell."""
+    """Launch an installed Windows app by name; configured aliases are optional overrides."""
     result = launch_app(name, arguments)
-    return agent.fields(result, "pid", "process_alive_after_launch")
+    return agent.fields(result, "app", "source", "pid", "process_alive_after_launch")
 
 
 @mcp.tool(annotations=WRITE_LOCAL)

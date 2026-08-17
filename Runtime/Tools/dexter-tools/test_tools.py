@@ -11,6 +11,7 @@ import asyncio
 import importlib
 import json
 import os
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -325,6 +326,7 @@ def image_suite() -> list[bool]:
 def system_suite() -> list[bool]:
     root = reset_test_root()
     _configure_root(root)
+    import app_discovery
     import launcher
     import process_tools
     import server
@@ -367,12 +369,36 @@ def system_suite() -> list[bool]:
         else:
             raise AssertionError("open_file allowed an executable/script type")
 
+        candidate = app_discovery.AppCandidate(
+            name="OMEN Gaming Hub",
+            source="start_apps",
+            launch_target="AD2F1837.OMENCommandCenter_abc!App",
+        )
+        with (
+            patch("launcher.resolve_installed_app", return_value=candidate) as resolve_mock,
+            patch(
+                "launcher.launch_installed_app",
+                return_value={
+                    "status": "ok",
+                    "operation": "open_app",
+                    "app": "OMEN Gaming Hub",
+                    "source": "start_apps",
+                    "pid": 123,
+                    "dispatched": True,
+                },
+            ) as launch_mock,
+        ):
+            result = launcher.launch_app("omen gaming hub")
+        check(result["app"] == "OMEN Gaming Hub", "installed app name was not preserved")
+        resolve_mock.assert_called_once_with("omen gaming hub")
+        launch_mock.assert_called_once_with(candidate)
+
         try:
-            launcher.launch_app("__dexter_unconfigured_test_app__")
-        except ValueError:
+            launcher.launch_app("ordinary discovered app", arguments=["--unexpected"])
+        except PermissionError:
             pass
         else:
-            raise AssertionError("open_app accepted an unconfigured alias")
+            raise AssertionError("open_app accepted arguments for a dynamically discovered app")
 
         alias = "__dexter_no_args_test__"
         previous_alias = launcher.APP_ALIASES.get(alias)
@@ -399,6 +425,71 @@ def system_suite() -> list[bool]:
             pass
         else:
             raise AssertionError("open_url accepted a non-HTTP URL")
+
+    def installed_app_name_matching():
+        candidates = (
+            app_discovery.AppCandidate(
+                name="OMEN Gaming Hub",
+                source="start_apps",
+                launch_target="omen-hub",
+            ),
+            app_discovery.AppCandidate(
+                name="OMEN Light Studio",
+                source="start_apps",
+                launch_target="omen-light",
+            ),
+            app_discovery.AppCandidate(
+                name="Google Chrome",
+                source="start_apps",
+                launch_target="chrome",
+            ),
+        )
+
+        with patch("app_discovery.discover_installed_apps", return_value=candidates):
+            exact = app_discovery.resolve_installed_app("OMEN Gaming Hub")
+            check(exact.name == "OMEN Gaming Hub", "exact installed-app match failed")
+
+            token = app_discovery.resolve_installed_app("chrome")
+            check(token.name == "Google Chrome", "distinctive token match failed")
+
+            typo = app_discovery.resolve_installed_app("omen gaming hup")
+            check(typo.name == "OMEN Gaming Hub", "strong typo match failed")
+
+            try:
+                app_discovery.resolve_installed_app("omen")
+            except ValueError as exc:
+                message = str(exc)
+                check(
+                    "OMEN Gaming Hub" in message and "OMEN Light Studio" in message,
+                    "ambiguous app error did not surface candidates",
+                )
+            else:
+                raise AssertionError("ambiguous installed-app name was guessed")
+
+    def configured_alias_precedes_discovery():
+        alias = "__dexter_alias_precedence__"
+        previous_alias = launcher.APP_ALIASES.get(alias)
+        launcher.APP_ALIASES[alias] = {
+            "command": [sys.executable],
+            "allow_arguments": False,
+        }
+        try:
+            with (
+                patch("launcher.subprocess.Popen") as popen_mock,
+                patch("launcher.resolve_installed_app") as discovery_mock,
+            ):
+                process = popen_mock.return_value
+                process.pid = 444
+                process.poll.return_value = None
+                with patch("launcher.psutil.pid_exists", return_value=True):
+                    result = launcher.launch_app(alias)
+            check(result["source"] == "configured_alias", "configured alias source missing")
+            check(not discovery_mock.called, "installed-app discovery overrode explicit alias")
+        finally:
+            if previous_alias is None:
+                launcher.APP_ALIASES.pop(alias, None)
+            else:
+                launcher.APP_ALIASES[alias] = previous_alias
 
     def process_wrapper():
         result = process_tools.process_running(pid=os.getpid())
@@ -566,6 +657,8 @@ def system_suite() -> list[bool]:
         run_case("System: compact clipboard result", compact_clipboard_contract),
         run_case("System: compact foreground-window result", foreground_contract),
         run_case("System: launcher policy guards", launcher_policy_guards),
+        run_case("System: installed app name matching", installed_app_name_matching),
+        run_case("System: configured app alias precedes discovery", configured_alias_precedes_discovery),
         run_case("System: process wrapper", process_wrapper),
         run_case("System: optional Windows .exe process suffix", process_name_exe_suffix_optional),
         run_case("System: DWM-visible frame geometry translation", visible_frame_geometry_translation),

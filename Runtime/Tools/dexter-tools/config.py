@@ -46,9 +46,11 @@ DEFAULT_PROCESS_RESULTS = 30
 DEFAULT_WINDOW_RESULTS = 30
 DEFAULT_SAVED_SEARCH_RESULTS = 10
 DEFAULT_WORKSPACE_LAUNCH_TIMEOUT_SECONDS = 20.0
+APP_DISCOVERY_CACHE_SECONDS = 300.0
+APP_DISCOVERY_POWERSHELL_TIMEOUT_SECONDS = 5.0
 
 # open_file uses Windows file associations, so executable/script/shortcut types
-# are blocked to avoid bypassing open_app's explicit allowlist.
+# are blocked to avoid bypassing open_app's installed-app/alias launch boundary.
 DANGEROUS_OPEN_FILE_EXTENSIONS = {
     ".bat", ".cmd", ".com", ".cpl", ".exe", ".hta", ".jar", ".js", ".jse",
     ".lnk", ".msi", ".msp", ".ps1", ".py", ".pyw", ".reg", ".scr", ".url",

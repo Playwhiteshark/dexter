@@ -4,7 +4,9 @@ ALLOWED_ROOTS = [
     # r"C:\path\to\trusted\root",
 ]
 
-# open_app accepts only aliases listed here and never an arbitrary command.
+# Optional open_app overrides/special launch targets. Ordinary installed Windows
+# apps are discovered automatically by name; aliases are not required for them.
+# Alias commands still never invoke a shell, and arguments remain denied by default.
 APP_ALIASES = {
     # "example app": {
     #     "command": [r"C:\path\to\app.exe"],
