@@ -199,17 +199,26 @@ def remember_current_vscode_project(
     aliases: list[str] | None = None,
     overwrite: bool = False,
 ) -> dict:
-    """Remember the focused VS Code project using bridge-grounded identity."""
+    """Remember the focused VS Code project using bridge-grounded identity.
+
+    Unlike ``remember_resource``, this tool accepts the exact existing project
+    currently reported by Dexter's local VS Code bridge even when it is outside
+    ``ALLOWED_ROOTS``. The model cannot provide a target to this function, and
+    the exception grants only later VS Code reopening; it does not expand the
+    filesystem tools' read/write boundary.
+    """
     session = current_vscode_session()
-    folders = [
-        str(folder).strip()
+    folder_candidates = [
+        Path(folder.strip()).expanduser().resolve(strict=False)
         for folder in session.get("workspace_folders") or []
         if isinstance(folder, str) and folder.strip()
     ]
-    for folder in folders:
-        resolved_folder = resolve_allowed_path(folder)
-        if not resolved_folder.is_dir():
-            raise ValueError(f"VS Code workspace folder is not a directory: {resolved_folder}")
+    for folder in folder_candidates:
+        if not folder.exists():
+            raise FileNotFoundError(f"VS Code workspace folder does not exist: {folder}")
+        if not folder.is_dir():
+            raise ValueError(f"VS Code workspace folder is not a directory: {folder}")
+    folders = [str(folder) for folder in folder_candidates]
 
     target = vscode_open_target(session)
     if not target:
@@ -219,11 +228,20 @@ def remember_current_vscode_project(
     candidate = Path(target).expanduser().resolve(strict=False)
     generated_root = GENERATED.expanduser().resolve(strict=False)
     if candidate.is_relative_to(generated_root):
-        if not candidate.is_file():
+        if candidate.suffix.casefold() != ".code-workspace" or not candidate.is_file():
             raise FileNotFoundError(f"Generated VS Code workspace was not created: {candidate}")
         clean_target = str(candidate)
+    elif candidate in folder_candidates:
+        clean_target = str(candidate)
+    elif candidate.suffix.casefold() == ".code-workspace" and candidate.is_file():
+        # A saved workspace file is also bridge-grounded: vscode_open_target
+        # derives it directly from this live session, not from model text.
+        clean_target = str(candidate)
     else:
-        clean_target = _validate_target("vscode", str(candidate))
+        raise ValueError(
+            "The VS Code bridge returned a target that is neither one of its "
+            f"live workspace folders nor an existing .code-workspace file: {candidate}"
+        )
 
     workspace_name = str(session.get("workspace_name") or "").strip()
     inferred_names = [

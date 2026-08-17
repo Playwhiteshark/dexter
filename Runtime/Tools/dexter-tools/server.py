@@ -289,6 +289,8 @@ def remember_current_project(
 
     Uses the VS Code bridge to identify the focused/most-recently-focused
     folder or workspace. The name may be omitted when VS Code provides one.
+    The exact bridge-confirmed project may be outside the general file-tool
+    roots; this authorizes reopening it in VS Code, not filesystem access.
     """
     result = remember_current_vscode_project(name, aliases, overwrite)
     resource = result["resource"]

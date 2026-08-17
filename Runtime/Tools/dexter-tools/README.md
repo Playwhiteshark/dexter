@@ -89,7 +89,7 @@ Generic request words such as `open`, `my`, `project`, and `workspace` do not ha
 
 Operational memory is stored outside the repository by default at `%LOCALAPPDATA%\Dexter\state\computer_memory.json`. This is intentionally separate from conversation history and future biographical/profile memory. `STATE_DIR` may be overridden in ignored `local_config.py`.
 
-Resource paths remain subject to `ALLOWED_ROOTS`. Saving a resource does not create a new filesystem permission boundary.
+Paths supplied to `remember_resource` remain subject to `ALLOWED_ROOTS`. `remember_current_project` is a narrow exception: because it has no target argument, it may remember the exact existing folder or `.code-workspace` file reported by the active local VS Code bridge even when that project is outside the configured roots. This authorizes reopening that one saved target in VS Code; it does not add the folder to `ALLOWED_ROOTS` or grant Dexter's file tools read/write access there.
 
 `remember_current_project` requires the local `Dexter Workspace State` VS Code integration. Version 0.1.2 records both current focus and the last real editor focus, because Dexter's overlay may own focus by the time a typed request is submitted. Install/update it from the repository root, then reload each VS Code window:
 

@@ -806,34 +806,47 @@ def memory_suite() -> list[bool]:
         resources.forget_resource("FriendBox project")
 
     def remember_current_vscode_project_from_bridge():
-        project = root / "Dexter"
-        project.mkdir()
-        session = {
-            "session_id": "dexter-live",
-            "workspace_name": "Dexter",
-            "workspace_file": None,
-            "workspace_folders": [str(project)],
-            "active_file": str(project / "README.md"),
-            "focused": True,
-        }
-        with patch("resources.current_vscode_session", return_value=session):
-            saved = resources.remember_current_vscode_project(
-                aliases=["local assistant"]
+        with tempfile.TemporaryDirectory(prefix="dexter-external-vscode-") as external:
+            project = Path(external) / "Dexter"
+            project.mkdir()
+            check(
+                not project.resolve().is_relative_to(root.resolve()),
+                "bridge exception test project accidentally used an allowed root",
             )
 
-        record = saved["resource"]
-        check(record["name"] == "Dexter", f"project name was not inferred: {record}")
-        check(record["target"] == str(project.resolve()), f"project target was guessed: {record}")
-        check("local assistant" in record["aliases"], f"explicit alias was lost: {record}")
+            try:
+                resources.remember_resource("Manual outside project", "vscode", str(project))
+            except ValueError as exc:
+                check("outside" in str(exc).casefold(), f"wrong manual boundary error: {exc}")
+            else:
+                raise AssertionError("manual project path bypassed ALLOWED_ROOTS")
 
-        with patch("resources.launch_app_with_trusted_arguments") as launch:
-            opened = resources.open_saved_resource("the Dexter project")
-        check(opened["name"] == "Dexter", f"remembered current project did not reopen: {opened}")
-        launch.assert_called_once_with(
-            "vscode",
-            ["--new-window", str(project.resolve())],
-        )
-        resources.forget_resource("Dexter VS Code project")
+            session = {
+                "session_id": "dexter-live",
+                "workspace_name": "Dexter",
+                "workspace_file": None,
+                "workspace_folders": [str(project)],
+                "active_file": str(project / "README.md"),
+                "focused": True,
+            }
+            with patch("resources.current_vscode_session", return_value=session):
+                saved = resources.remember_current_vscode_project(
+                    aliases=["local assistant"]
+                )
+
+            record = saved["resource"]
+            check(record["name"] == "Dexter", f"project name was not inferred: {record}")
+            check(record["target"] == str(project.resolve()), f"project target was guessed: {record}")
+            check("local assistant" in record["aliases"], f"explicit alias was lost: {record}")
+
+            with patch("resources.launch_app_with_trusted_arguments") as launch:
+                opened = resources.open_saved_resource("the Dexter project")
+            check(opened["name"] == "Dexter", f"remembered current project did not reopen: {opened}")
+            launch.assert_called_once_with(
+                "vscode",
+                ["--new-window", str(project.resolve())],
+            )
+            resources.forget_resource("Dexter VS Code project")
 
     def current_vscode_project_uses_last_real_focus():
         older = {
