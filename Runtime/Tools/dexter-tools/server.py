@@ -720,7 +720,7 @@ def wait_for_image(
 @mcp.tool(annotations=DESTRUCTIVE_LOCAL)
 def start_click_job(
     interval_seconds: float,
-    position_mode: Literal["current", "fixed"] = "current",
+    position_mode: Literal["current", "fixed", "follow_cursor"] = "current",
     x: int | None = None,
     y: int | None = None,
     button: Literal["left", "right", "middle"] = "left",
@@ -729,7 +729,13 @@ def start_click_job(
     stop_image_path: str | None = None,
     stop_image_confidence: float = 0.90,
 ) -> dict:
-    """Start a cancellable background click job with optional stop conditions."""
+    """Start a cancellable background click job with optional stop conditions.
+
+    ``current`` captures the cursor position once at job start and keeps
+    clicking that anchored point. ``fixed`` requires explicit x/y coordinates.
+    ``follow_cursor`` clicks wherever the cursor is at each interval without
+    moving it.
+    """
     return agent.job(
         start_click_interval_job(
             interval_seconds=interval_seconds,

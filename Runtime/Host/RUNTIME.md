@@ -19,6 +19,19 @@ created.
 Typed prompts are available at the bottom of the overlay. Enter or the Send
 button submits a single-line prompt through the same Goose ACP session as voice.
 
+Each Dexter response can retain a bounded activity record from ACP. The
+collapsed row summarizes tool calls, plans, and reasoning chunks; expanding it
+shows the protocol-provided details. A separate badge says whether Dexter used
+the `web_search` tool and whether that call completed or failed. Raw tool input,
+output, and text are deliberately truncated before they enter the Qt history so
+one large tool result cannot make the overlay unbounded.
+
+Deleting or undoing only the most recent prompt/response pair is intentionally
+deferred. ACP can cancel an active prompt and can delete an entire saved
+session, but it does not expose stable mutation of a completed turn. Removing
+only the visible cards would leave Goose's actual context unchanged and would
+therefore be a misleading undo.
+
 The Host also owns Dexter's per-chat tool approval policy. Classified Dexter
 tools are auto-approved, unknown future tools default to Ask, and pre-existing
 file writes use path-specific, SHA-256-verified trust that is cleared with the

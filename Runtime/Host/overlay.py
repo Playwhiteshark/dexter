@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from Runtime.Host.thinking_messages import THINKING_MESSAGES
+from Runtime.Host.activity_events import ActivityRecord, ActivityUpdate
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,11 +139,62 @@ class _ThinkingWave(QWidget):
         painter.end()
 
 
+class _ActivityEntryCard(QFrame):
+    """One compact, selectable activity record inside an expanded response."""
+
+    def __init__(self, record: ActivityRecord) -> None:
+        super().__init__()
+        self.setObjectName("activityEntry")
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 7)
+        layout.setSpacing(3)
+
+        self.title_label = QLabel()
+        self.title_label.setObjectName("activityEntryTitle")
+        self.title_label.setWordWrap(True)
+
+        self.detail_label = QLabel()
+        self.detail_label.setObjectName("activityEntryDetail")
+        self.detail_label.setWordWrap(True)
+        self.detail_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.detail_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.detail_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Minimum,
+        )
+
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.detail_label)
+        self.update_record(record)
+
+    def update_record(self, record: ActivityRecord) -> None:
+        self.title_label.setText(record.heading())
+        detail = record.details()
+        self.detail_label.setText(detail)
+        self.detail_label.setVisible(bool(detail))
+
+
 class _MessageCard(QFrame):
-    def __init__(self, role: str, text: str = "", *, draft: bool = False) -> None:
+    _MAX_ACTIVITY_RECORDS = 40
+
+    def __init__(
+        self,
+        role: str,
+        text: str = "",
+        *,
+        draft: bool = False,
+        activity_enabled: bool = False,
+    ) -> None:
         super().__init__()
         self.setObjectName("messageCard")
         self.setProperty("draft", draft)
+
+        self._activity_enabled = activity_enabled
+        self._activity_records: dict[str, ActivityRecord] = {}
+        self._activity_widgets: dict[str, _ActivityEntryCard] = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 9, 12, 10)
@@ -150,6 +202,17 @@ class _MessageCard(QFrame):
 
         self.role_label = QLabel(role)
         self.role_label.setObjectName("roleLabel")
+
+        role_row = QHBoxLayout()
+        role_row.setContentsMargins(0, 0, 0, 0)
+        role_row.setSpacing(6)
+        role_row.addWidget(self.role_label)
+        role_row.addStretch(1)
+
+        self.web_badge = QLabel()
+        self.web_badge.setObjectName("webBadge")
+        self.web_badge.hide()
+        role_row.addWidget(self.web_badge)
 
         self.body_label = QLabel(text)
         self.body_label.setObjectName("messageBody")
@@ -165,9 +228,28 @@ class _MessageCard(QFrame):
 
         self.thinking_wave = _ThinkingWave()
 
-        layout.addWidget(self.role_label)
+        self.activity_button = QToolButton()
+        self.activity_button.setObjectName("activityButton")
+        self.activity_button.setCheckable(True)
+        self.activity_button.setAutoRaise(True)
+        self.activity_button.setToolTip("Show Dexter's reasoning and tool activity")
+        self.activity_button.setAccessibleName("Show Dexter activity")
+        self.activity_button.toggled.connect(self._set_activity_expanded)
+        self.activity_button.hide()
+
+        self.activity_panel = QFrame()
+        self.activity_panel.setObjectName("activityPanel")
+        self.activity_layout = QVBoxLayout(self.activity_panel)
+        self.activity_layout.setContentsMargins(0, 2, 0, 0)
+        self.activity_layout.setSpacing(5)
+        self.activity_panel.hide()
+
+        layout.addLayout(role_row)
         layout.addWidget(self.body_label)
         layout.addWidget(self.thinking_wave)
+        if activity_enabled:
+            layout.addWidget(self.activity_button)
+            layout.addWidget(self.activity_panel)
 
     def set_text(self, text: str) -> None:
         self.body_label.setText(text)
@@ -181,6 +263,79 @@ class _MessageCard(QFrame):
 
     def stop_thinking(self) -> None:
         self.thinking_wave.stop()
+
+    def add_activity(self, update: ActivityUpdate) -> None:
+        if not self._activity_enabled:
+            return
+
+        record = self._activity_records.get(update.activity_id)
+        if record is None:
+            if len(self._activity_records) >= self._MAX_ACTIVITY_RECORDS:
+                return
+            record = ActivityRecord.from_update(update)
+            self._activity_records[update.activity_id] = record
+            widget = _ActivityEntryCard(record)
+            self._activity_widgets[update.activity_id] = widget
+            self.activity_layout.addWidget(widget)
+        else:
+            record.apply(update)
+            self._activity_widgets[update.activity_id].update_record(record)
+
+        self._refresh_activity_summary()
+
+    def _refresh_activity_summary(self) -> None:
+        tool_count = sum(
+            record.category == "tool"
+            for record in self._activity_records.values()
+        )
+        has_thought = any(
+            record.category == "thought"
+            for record in self._activity_records.values()
+        )
+        has_plan = any(
+            record.category == "plan"
+            for record in self._activity_records.values()
+        )
+
+        parts: list[str] = []
+        if tool_count:
+            parts.append(f"{tool_count} tool" + ("s" if tool_count != 1 else ""))
+        if has_thought:
+            parts.append("reasoning")
+        if has_plan:
+            parts.append("plan")
+
+        marker = "▼" if self.activity_button.isChecked() else "▶"
+        suffix = f" · {' · '.join(parts)}" if parts else ""
+        self.activity_button.setText(f"{marker} Activity{suffix}")
+        self.activity_button.setVisible(bool(self._activity_records))
+
+        web_records = [
+            record
+            for record in self._activity_records.values()
+            if record.is_web_search
+        ]
+        if not web_records:
+            self.web_badge.hide()
+            return
+
+        statuses = {record.status for record in web_records}
+        if "completed" in statuses:
+            self.web_badge.setText("Web used")
+            self.web_badge.setProperty("state", "completed")
+        elif statuses & {"failed", "error", "cancelled", "canceled"}:
+            self.web_badge.setText("Web failed")
+            self.web_badge.setProperty("state", "failed")
+        else:
+            self.web_badge.setText("Web search")
+            self.web_badge.setProperty("state", "active")
+        self.web_badge.style().unpolish(self.web_badge)
+        self.web_badge.style().polish(self.web_badge)
+        self.web_badge.show()
+
+    def _set_activity_expanded(self, expanded: bool) -> None:
+        self.activity_panel.setVisible(expanded)
+        self._refresh_activity_summary()
 
     def finalize_user(self) -> None:
         self.setProperty("draft", False)
@@ -577,9 +732,53 @@ class DexterOverlay(QWidget):
                 font-weight: 600;
                 color: rgba(255, 255, 255, 130);
             }
+            QLabel#webBadge {
+                background-color: rgba(86, 156, 214, 35);
+                border: 1px solid rgba(100, 174, 235, 65);
+                border-radius: 5px;
+                color: rgba(180, 220, 252, 220);
+                font-size: 9px;
+                font-weight: 600;
+                padding: 1px 5px;
+            }
+            QLabel#webBadge[state="failed"] {
+                background-color: rgba(220, 88, 88, 28);
+                border-color: rgba(235, 105, 105, 58);
+                color: rgba(255, 190, 190, 215);
+            }
             QLabel#messageBody {
                 font-size: 13px;
                 color: rgba(255, 255, 255, 238);
+            }
+            QToolButton#activityButton {
+                background: transparent;
+                border: none;
+                color: rgba(255, 255, 255, 145);
+                font-size: 10px;
+                padding: 3px 1px 1px 1px;
+                text-align: left;
+            }
+            QToolButton#activityButton:hover {
+                color: rgba(255, 255, 255, 225);
+            }
+            QFrame#activityPanel {
+                background: transparent;
+                border: none;
+            }
+            QFrame#activityEntry {
+                background-color: rgba(0, 0, 0, 28);
+                border: 1px solid rgba(255, 255, 255, 16);
+                border-radius: 7px;
+            }
+            QLabel#activityEntryTitle {
+                color: rgba(255, 255, 255, 185);
+                font-size: 10px;
+                font-weight: 600;
+            }
+            QLabel#activityEntryDetail {
+                color: rgba(255, 255, 255, 155);
+                font-family: "Cascadia Mono", "Consolas";
+                font-size: 10px;
             }
             QFrame#approvalCard {
                 background-color: rgba(38, 38, 45, 242);
@@ -763,7 +962,11 @@ class DexterOverlay(QWidget):
     @Slot()
     def begin_assistant_response(self) -> None:
         self.finish_assistant_response()
-        self._assistant_card = _MessageCard("Dexter", "")
+        self._assistant_card = _MessageCard(
+            "Dexter",
+            "",
+            activity_enabled=True,
+        )
         self._insert_card(self._assistant_card)
         self._assistant_card.start_thinking()
         self._scroll_to_bottom()
@@ -783,6 +986,14 @@ class DexterOverlay(QWidget):
         self._thinking_resume_timer.stop()
         self._assistant_card.append_text(text)
         self._thinking_resume_timer.start()
+        self._scroll_to_bottom()
+
+    @Slot(object)
+    def add_assistant_activity(self, update: ActivityUpdate) -> None:
+        if self._assistant_card is None:
+            self.begin_assistant_response()
+        assert self._assistant_card is not None
+        self._assistant_card.add_activity(update)
         self._scroll_to_bottom()
 
     @Slot()

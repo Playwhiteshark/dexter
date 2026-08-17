@@ -2061,13 +2061,20 @@ def desktop_suite() -> list[bool]:
         check(isinstance(pos["x"], int) and isinstance(pos["y"], int), "invalid cursor position")
 
     def scheduler_mocked():
-        clicks = {"count": 0}
+        clicks: list[dict] = []
 
         def fake_click_mouse(**kwargs):
-            clicks["count"] += 1
+            clicks.append(kwargs)
             return {"status": "ok"}
 
-        with patch.object(jobs, "click_mouse", side_effect=fake_click_mouse):
+        with (
+            patch.object(jobs, "click_mouse", side_effect=fake_click_mouse),
+            patch.object(
+                jobs,
+                "perform_computer_action",
+                return_value={"x": 41, "y": 73},
+            ) as cursor_position,
+        ):
             started = jobs.start_click_interval_job(interval_seconds=0.10, position_mode="current", max_runs=2)
             job_id = started["job"]["job_id"]
             deadline = time.monotonic() + 2.0
@@ -2078,12 +2085,34 @@ def desktop_suite() -> list[bool]:
                 time.sleep(0.03)
             final = jobs.get_job_status(job_id)["job"]
             check(final["runs"] == 2, f"expected 2 mocked clicks, got {final['runs']}")
+            check(
+                clicks[:2] == [
+                    {"button": "left", "x": 41, "y": 73},
+                    {"button": "left", "x": 41, "y": 73},
+                ],
+                f"current mode did not remain anchored: {clicks[:2]}",
+            )
+            cursor_position.assert_called_once_with("cursor_position")
 
-            started2 = jobs.start_click_interval_job(interval_seconds=0.10, position_mode="current")
+            started2 = jobs.start_click_interval_job(interval_seconds=0.10, position_mode="follow_cursor")
             job_id2 = started2["job"]["job_id"]
             time.sleep(0.15)
             cancelled = jobs.cancel_background_job(job_id2, wait_seconds=1.0)["job"]
             check(cancelled["state"] == "cancelled", f"cancel ended as {cancelled['state']}")
+            check(
+                all(call == {"button": "left"} for call in clicks[2:]),
+                f"follow_cursor unexpectedly anchored or moved the cursor: {clicks[2:]}",
+            )
+
+            try:
+                jobs.start_click_interval_job(
+                    interval_seconds=0.10,
+                    position_mode="fixed",
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("fixed mode accepted missing coordinates")
 
     def visual_stop_condition_mocked():
         click_count = {"value": 0}
@@ -2105,6 +2134,11 @@ def desktop_suite() -> list[bool]:
         with (
             patch.object(jobs, "click_mouse", side_effect=fake_click_mouse),
             patch.object(jobs, "find_image_on_screen", side_effect=fake_find_image),
+            patch.object(
+                jobs,
+                "perform_computer_action",
+                return_value={"x": 10, "y": 10},
+            ),
         ):
             started = jobs.start_click_interval_job(
                 interval_seconds=0.10,

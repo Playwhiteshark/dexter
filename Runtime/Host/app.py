@@ -5,7 +5,8 @@ Runtime:
 - Qt owns presentation/tray.
 - GooseACP owns one ``goose acp`` child process + persistent session.
 - Finalized speech is sent to Goose.
-- AgentMessageChunk text streams into the Dexter response card.
+- Agent text streams into the response card while bounded ACP activity records
+  remain expandable beneath that same response.
 - Dexter's own permission policy auto-approves classified computer actions and
   keeps exceptional file approvals inside the Host UI.
 """
@@ -61,6 +62,7 @@ class GooseQtBridge(QObject):
     permission_request = Signal(object)
     permission_cleared = Signal()
     chat_cleared = Signal()
+    activity = Signal(object)
 
 
 class RuntimeQtBridge(QObject):
@@ -108,6 +110,7 @@ class DexterHost:
             on_permission_request=self.goose_bridge.permission_request.emit,
             on_permission_cleared=self.goose_bridge.permission_cleared.emit,
             on_chat_cleared=self.goose_bridge.chat_cleared.emit,
+            on_activity=self.goose_bridge.activity.emit,
         )
 
         self._quitting = False
@@ -186,6 +189,7 @@ class DexterHost:
             self.overlay.clear_approval
         )
         self.goose_bridge.chat_cleared.connect(self._on_chat_cleared)
+        self.goose_bridge.activity.connect(self._on_activity)
 
     def _connect_runtime(self) -> None:
         self.runtime_bridge.gateway_state.connect(self._on_gateway_state)
@@ -420,6 +424,11 @@ class DexterHost:
     def _on_response_text(self, text: str) -> None:
         self.summon_overlay()
         self.overlay.append_assistant_text(text)
+
+    @Slot(object)
+    def _on_activity(self, update) -> None:
+        self.summon_overlay()
+        self.overlay.add_assistant_activity(update)
 
     @Slot(str)
     def _on_response_end(self, stop_reason: str) -> None:

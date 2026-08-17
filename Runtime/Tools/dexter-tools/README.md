@@ -65,7 +65,7 @@ The benchmark uses an isolated Goose data root, `GOOSE_MODE=auto`, and a benchma
 - `open_url` accepts only HTTP/HTTPS.
 - Window closing is graceful; `close_app`, `close_all_windows_for_app`, and `close_every_app_on_active_desktop` never hard-kill processes. `close_all_windows_for_app(process_name)` closes every visible window for one exact process name on the active Windows virtual desktop; it is the scoped choice for requests such as “close every VS Code window.” `close_every_app_on_active_desktop` is reserved for an explicit request to close every app. Both desktop-scoped tools snapshot titled user-facing windows, exclude Dexter and Windows shell surfaces, and fail before closing anything if Windows cannot verify virtual-desktop membership.
 - PyAutoGUI's corner fail-safe remains enabled.
-- Repeating click jobs are cancellable and can have run/time/visual stop conditions.
+- Repeating click jobs are cancellable and can have run/time/visual stop conditions. `current` captures the cursor point once, `fixed` uses explicit coordinates, and `follow_cursor` deliberately tracks the live cursor.
 
 The Host owns the approval policy above Goose's `smart_approve` requests. Every current tool is classified explicitly and future tools default to Ask. Ordinary reads and computer operations are automatically allowed. `write_file`, plus `screenshot(..., overwrite=True)` for an existing target, asks once per file per chat. Files created by Dexter in the current chat are trusted automatically. After each successful write the Host records the expected SHA-256; an out-of-band change revokes silent trust and asks again. Clear Chat removes all file trust.
 

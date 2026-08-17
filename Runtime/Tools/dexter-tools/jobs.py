@@ -10,7 +10,11 @@ from config import (
     MAX_BACKGROUND_JOBS,
     MIN_CLICK_INTERVAL_SECONDS,
 )
-from computer_tools import click_mouse
+from computer_tools import (
+    _validate_coordinate,
+    click_mouse,
+    perform_computer_action,
+)
 from screen_tools import find_image_on_screen
 
 
@@ -104,7 +108,7 @@ def _run_click_job(job: ClickJob) -> None:
                     job.stop_reason = "stop_image_found"
                     break
 
-            if job.position_mode == "current":
+            if job.position_mode == "follow_cursor":
                 click_mouse(button=job.button)
             else:
                 click_mouse(
@@ -134,7 +138,7 @@ def _run_click_job(job: ClickJob) -> None:
 
 def start_click_interval_job(
     interval_seconds: float,
-    position_mode: Literal["current", "fixed"] = "current",
+    position_mode: Literal["current", "fixed", "follow_cursor"] = "current",
     x: int | None = None,
     y: int | None = None,
     button: Literal["left", "right", "middle"] = "left",
@@ -148,8 +152,10 @@ def start_click_interval_job(
             f"interval_seconds must be between "
             f"{MIN_CLICK_INTERVAL_SECONDS} and 3600."
         )
-    if position_mode not in {"current", "fixed"}:
-        raise ValueError("position_mode must be current or fixed.")
+    if position_mode not in {"current", "fixed", "follow_cursor"}:
+        raise ValueError(
+            "position_mode must be current, fixed, or follow_cursor."
+        )
     if button not in {"left", "right", "middle"}:
         raise ValueError("button must be left, right, or middle.")
     if max_runs is not None and (max_runs < 1 or max_runs > 1_000_000):
@@ -163,24 +169,26 @@ def start_click_interval_job(
         if x is not None or y is not None:
             raise ValueError(
                 "For position_mode='current', omit x and y. "
-                "Each click will occur at the cursor's current position without moving it."
+                "Dexter captures the cursor position once when the job starts."
+            )
+        # "Current spot" means the spot under the cursor at start time. It is
+        # deliberately anchored so moving the physical mouse cannot drag the
+        # click target around afterward.
+        position = perform_computer_action("cursor_position")
+        fixed_x = int(position["x"])
+        fixed_y = int(position["y"])
+    elif position_mode == "fixed":
+        if x is None or y is None:
+            raise ValueError("For position_mode='fixed', supply both x and y.")
+        # Keep invalid jobs from being registered before the first click.
+        _validate_coordinate(x, y)
+        fixed_x, fixed_y = x, y
+    else:
+        if x is not None or y is not None:
+            raise ValueError(
+                "For position_mode='follow_cursor', omit x and y."
             )
         fixed_x = fixed_y = None
-    else:
-        if (x is None) != (y is None):
-            raise ValueError("For fixed mode, supply both x and y or neither.")
-        if x is None:
-            # Capture the current point once, then anchor all future clicks there.
-            from computer_tools import perform_computer_action
-            position = perform_computer_action("cursor_position")
-            fixed_x = int(position["x"])
-            fixed_y = int(position["y"])
-        else:
-            # click_mouse validates the actual coordinate before the first click;
-            # this preflight keeps invalid jobs from being registered.
-            from computer_tools import _validate_coordinate
-            _validate_coordinate(x, y)
-            fixed_x, fixed_y = x, y
 
     if stop_image_path:
         # Validate path/confidence before starting a thread. "Not found" is fine.

@@ -27,6 +27,10 @@ from typing import Any, Callable
 from acp import PROTOCOL_VERSION, spawn_agent_process, text_block
 from acp.interfaces import Client
 
+from Runtime.Host.activity_events import (
+    ActivityUpdate,
+    normalize_acp_activity,
+)
 from Runtime.Host.permission_policy import (
     PermissionDecision,
     ToolPermissionPolicy,
@@ -61,6 +65,7 @@ TextCallback = Callable[[str], None]
 StringCallback = Callable[[str], None]
 VoidCallback = Callable[[], None]
 PermissionCallback = Callable[[PermissionRequest], None]
+ActivityCallback = Callable[[ActivityUpdate], None]
 
 
 class _ACPClient(Client):
@@ -109,6 +114,7 @@ class GooseACP:
         on_permission_request: PermissionCallback | None = None,
         on_permission_cleared: VoidCallback | None = None,
         on_chat_cleared: VoidCallback | None = None,
+        on_activity: ActivityCallback | None = None,
     ) -> None:
         self.cwd = Path(cwd).resolve()
 
@@ -120,6 +126,7 @@ class GooseACP:
         self._on_permission_request = on_permission_request
         self._on_permission_cleared = on_permission_cleared
         self._on_chat_cleared = on_chat_cleared
+        self._on_activity = on_activity
 
         self._commands: queue.Queue[str | object] = queue.Queue()
         self._thread: threading.Thread | None = None
@@ -446,6 +453,10 @@ class GooseACP:
             return
 
         self._permission_policy.observe_tool_update(update)
+
+        activity = normalize_acp_activity(update)
+        if activity is not None:
+            self._emit(self._on_activity, activity)
 
         # Goose 1.45.0 + ACP v1 emitted AgentMessageChunk in the compatibility
         # probe. Match the protocol discriminator too so this remains tolerant
