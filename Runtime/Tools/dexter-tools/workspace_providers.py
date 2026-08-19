@@ -65,6 +65,7 @@ _RESIZABLE_MAIN_WINDOW_PROVIDERS = {
 # its visible UI may be owned by steamwebhelper.exe, but reopening must always
 # dispatch the real Steam client (steam.exe), never the helper executable.
 _DIRECT_EXE_PROVIDERS = {
+    "vscode",
     "visual_studio",
     "chromium_browser",
     "firefox",
@@ -203,6 +204,14 @@ def _find_steam_executable(saved: dict) -> str | None:
 
 
 def _spawn(command: list[str], label: str) -> dict:
+    if label == "vscode" and len(command) >= 3 and command[1] == "-n":
+        result = launch_vscode_project(command[2])
+        return {
+            **result,
+            "operation": "workspace_provider_launch",
+            "provider": "vscode",
+        }
+
     proc = subprocess.Popen(
         command,
         shell=False,
@@ -273,11 +282,14 @@ def launch_workspace_provider(saved: dict) -> dict | None:
         return _launch_steam(saved)
 
     if provider == "vscode":
+        exe = _validated_saved_executable(saved, provider)
+        if not exe:
+            return None
         state = saved.get("app_state") if isinstance(saved.get("app_state"), dict) else {}
         target = vscode_open_target(state)
-        if not target:
-            return None
-        return launch_vscode_project(target)
+        if target:
+            return _spawn([exe, "-n", target], provider)
+        return None
 
     if provider not in _DIRECT_EXE_PROVIDERS:
         return None
