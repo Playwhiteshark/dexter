@@ -6,7 +6,7 @@ import subprocess
 import time
 import webbrowser
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import psutil
 
@@ -209,7 +209,7 @@ def _find_vscode_executable() -> str:
 
 
 def launch_vscode_project(target: str, configured_alias: str = "vscode") -> dict:
-    """Open one validated project with fixed arguments and no model command line."""
+    """Ask VS Code's registered URL handler to open one validated project."""
     project = Path(target).expanduser().resolve(strict=False)
     if not project.exists():
         raise FileNotFoundError(f"Saved VS Code project no longer exists: {project}")
@@ -217,35 +217,54 @@ def launch_vscode_project(target: str, configured_alias: str = "vscode") -> dict
         project.is_file() and project.suffix.casefold() == ".code-workspace"
     ):
         raise ValueError("Saved VS Code target must be a folder or .code-workspace file.")
-
-    if _has_configured_app_alias(configured_alias):
-        return _launch_configured_app(
-            configured_alias,
-            ["--new-window", str(project)],
-            require_argument_permission=False,
-        )
     if os.name != "nt":
         raise RuntimeError("VS Code project launching is currently implemented for Windows only.")
 
-    executable = _find_vscode_executable()
-    command = [executable, "--new-window", str(project)]
-    proc = subprocess.Popen(
-        command,
-        shell=False,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-    return {
-        "status": "ok",
-        "operation": "open_vscode_project",
-        "app": "Visual Studio Code",
-        "source": "installed_app",
-        "command": command,
-        "pid": proc.pid,
-        "dispatched": True,
-    }
+    path = project.as_posix()
+    if project.is_dir() and not path.endswith("/"):
+        path += "/"
+    uri = f"vscode://file/{quote(path, safe='/:')}"
+
+    try:
+        os.startfile(uri)
+        return {
+            "status": "ok",
+            "operation": "open_vscode_project",
+            "app": "Visual Studio Code",
+            "source": "vscode_url_handler",
+            "target": str(project),
+            "dispatched": True,
+        }
+    except OSError:
+        # Keep a conservative fallback for machines where the vscode://
+        # protocol is not registered. Normal launches should stay with VS Code's
+        # own Windows integration rather than making Code.exe a Dexter child.
+        if _has_configured_app_alias(configured_alias):
+            return _launch_configured_app(
+                configured_alias,
+                ["--new-window", str(project)],
+                require_argument_permission=False,
+            )
+
+        executable = _find_vscode_executable()
+        command = [executable, "--new-window", str(project)]
+        proc = subprocess.Popen(
+            command,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        return {
+            "status": "ok",
+            "operation": "open_vscode_project",
+            "app": "Visual Studio Code",
+            "source": "direct_fallback",
+            "command": command,
+            "pid": proc.pid,
+            "dispatched": True,
+        }
 
 
 def configured_app_alias_for_executable(exe_path: str | None) -> str | None:
