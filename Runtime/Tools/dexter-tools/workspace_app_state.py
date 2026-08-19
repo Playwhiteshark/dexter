@@ -10,7 +10,7 @@ from __future__ import annotations
 from browser_state import capture_browser_state, restore_browser_state
 from explorer_state import capture_explorer_state, restore_explorer_state
 from terminal_state import capture_terminal_state
-from vscode_state import capture_vscode_state, restore_vscode_state
+from vscode_state import capture_vscode_state
 from workspace_providers import provider_for_process_name, provider_for_saved_window
 
 
@@ -52,11 +52,10 @@ def restore_window_app_state(saved: dict, current_window: dict) -> tuple[dict | 
             if result.get("active_tab_ready") is False:
                 warnings.append("browser active tab had not committed a real page before the restore timeout")
             return result, "; ".join(warnings) if warnings else None
-        if provider == "vscode" and state.get("kind") == "vscode":
-            return restore_vscode_state(saved, current_window), None
         if provider == "explorer" and state.get("kind") == "explorer":
             return restore_explorer_state(saved, current_window), None
-        # Windows Terminal state is consumed at launch time by the provider.
+        # VS Code owns editor/session restoration itself once Dexter opens the
+        # saved project. Windows Terminal state is likewise consumed at launch.
     except Exception as exc:
         return None, f"{provider or 'app'} state restore unavailable: {type(exc).__name__}: {exc}"
     return None, None
