@@ -8,7 +8,6 @@ opening a console window when the Host is launched with pythonw.exe.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import subprocess
 import sys
 from collections.abc import AsyncIterator
@@ -58,24 +57,22 @@ async def spawn_host_agent_process(
     try:
         yield conn, process
     finally:
-        with contextlib.suppress(Exception):
-            await conn.close()
-
-        if process.returncode is not None:
-            return
-
         try:
-            await asyncio.wait_for(
-                process.wait(),
-                timeout=SHUTDOWN_TIMEOUT_SECONDS,
-            )
-        except asyncio.TimeoutError:
-            process.terminate()
-            try:
-                await asyncio.wait_for(
-                    process.wait(),
-                    timeout=SHUTDOWN_TIMEOUT_SECONDS,
-                )
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+            await conn.close()
+        finally:
+            if process.returncode is None:
+                try:
+                    await asyncio.wait_for(
+                        process.wait(),
+                        timeout=SHUTDOWN_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    process.terminate()
+                    try:
+                        await asyncio.wait_for(
+                            process.wait(),
+                            timeout=SHUTDOWN_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.TimeoutError:
+                        process.kill()
+                        await process.wait()
