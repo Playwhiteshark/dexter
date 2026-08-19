@@ -12,6 +12,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from launcher import launch_vscode_project
 from terminal_state import terminal_launch_command
 from vscode_state import vscode_open_target
 
@@ -64,7 +65,6 @@ _RESIZABLE_MAIN_WINDOW_PROVIDERS = {
 # its visible UI may be owned by steamwebhelper.exe, but reopening must always
 # dispatch the real Steam client (steam.exe), never the helper executable.
 _DIRECT_EXE_PROVIDERS = {
-    "vscode",
     "visual_studio",
     "chromium_browser",
     "firefox",
@@ -122,7 +122,6 @@ def _validated_saved_executable(saved: dict, provider: str) -> str | None:
     if path.name.casefold() != process_name:
         return None
     return str(path)
-
 
 
 
@@ -274,14 +273,11 @@ def launch_workspace_provider(saved: dict) -> dict | None:
         return _launch_steam(saved)
 
     if provider == "vscode":
-        exe = _validated_saved_executable(saved, provider)
-        if not exe:
-            return None
         state = saved.get("app_state") if isinstance(saved.get("app_state"), dict) else {}
         target = vscode_open_target(state)
-        if target:
-            return _spawn([exe, "-n", target], provider)
-        return _spawn([exe], provider)
+        if not target:
+            return None
+        return launch_vscode_project(target)
 
     if provider not in _DIRECT_EXE_PROVIDERS:
         return None
