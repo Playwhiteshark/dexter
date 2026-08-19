@@ -24,9 +24,10 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
-from acp import PROTOCOL_VERSION, spawn_agent_process, text_block
+from acp import PROTOCOL_VERSION, text_block
 from acp.interfaces import Client
 
+from Runtime.Host.acp_process import spawn_host_agent_process
 from Runtime.Host.activity_events import (
     ActivityUpdate,
     normalize_acp_activity,
@@ -371,7 +372,7 @@ class GooseACP:
         client = _ACPClient(self)
 
         try:
-            async with spawn_agent_process(
+            async with spawn_host_agent_process(
                 client,
                 goose,
                 "acp",
