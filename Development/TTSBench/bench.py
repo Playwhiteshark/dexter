@@ -149,6 +149,11 @@ def _cache_env(family: str) -> dict[str, str]:
         path.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
+    # Do not inherit an externally-set PIP_CONSTRAINT. On Windows, pip parses
+    # that environment variable as a whitespace-separated value, so a repo path
+    # containing spaces can be truncated. The harness passes constraints via
+    # explicit argv instead.
+    env.pop("PIP_CONSTRAINT", None)
     env.update(
         {
             "HF_HOME": str(hf_home),
@@ -174,18 +179,23 @@ def _family_probe_code(family: str) -> str:
     raise ValueError(f"Unknown family: {family}")
 
 
-def _family_ready(family: str) -> bool:
+def _family_ready(family: str, *, verbose: bool = False) -> bool:
     python = _venv_python(family)
     if not python.exists():
         return False
     try:
-        subprocess.run(
-            [str(python), "-c", _family_probe_code(family)],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env=_cache_env(family),
-        )
+        kwargs = {
+            "check": True,
+            "env": _cache_env(family),
+        }
+        if not verbose:
+            kwargs.update(
+                {
+                    "stdout": subprocess.DEVNULL,
+                    "stderr": subprocess.DEVNULL,
+                }
+            )
+        subprocess.run([str(python), "-c", _family_probe_code(family)], **kwargs)
         return True
     except (OSError, subprocess.CalledProcessError):
         return False
@@ -268,21 +278,30 @@ def setup(name: str) -> None:
 
         python = _venv_python(family)
         print(f"Installing {PACKAGE_LABEL[family]} (pip cache disabled)")
+        pip_command = [
+            str(python),
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--no-cache-dir",
+        ]
+        if family == "neutts":
+            constraints = ROOT / "neutts-constraints.txt"
+            if not constraints.exists():
+                raise RuntimeError(f"Missing NeuTTS constraints file: {constraints}")
+            pip_command += ["--constraint", str(constraints)]
+        pip_command.append(PACKAGE_SPEC[family])
+
         subprocess.run(
-            [
-                str(python),
-                "-m",
-                "pip",
-                "install",
-                "--disable-pip-version-check",
-                "--no-cache-dir",
-                PACKAGE_SPEC[family],
-            ],
+            pip_command,
             check=True,
             env=_cache_env(family),
         )
 
         if not _family_ready(family):
+            print(f"{family} import/API probe failed; traceback follows:")
+            _family_ready(family, verbose=True)
             raise RuntimeError(f"{family} installed but failed its import/API probe")
     except Exception:
         if family_dir.exists():
