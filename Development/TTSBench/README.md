@@ -2,8 +2,11 @@
 
 Small, disposable CPU-only listening/latency harness for conversational TTS candidates.
 
-It keeps each engine's Python environment **and model caches** under
-`Development/TTSBench/.runtime/`, so losing engines can be deleted cleanly.
+Chatterbox keeps its Python environment and model caches under
+`Development/TTSBench/.runtime/`. On Windows, NeuTTS uses the shorter
+`%LOCALAPPDATA%\DexterTTSBench\neutts\` path because PyTorch's deeply nested
+package files can otherwise exceed the Windows path limit when installed from a
+long repository path. `bench.py clean` removes either location normally.
 Generated WAVs live under `results/` and are kept when an engine is cleaned.
 
 ## Shared reference voice
@@ -23,7 +26,7 @@ Behavior when they are absent:
   `neutral` mode.
 
 `reference.wav`, `reference.txt`, generated results, and temporary runtimes are
-gitignored.
+gitignored where applicable.
 
 ## Commands
 
@@ -72,13 +75,14 @@ python Development\TTSBench\bench.py clean all
 
 The controller itself uses only the standard library.
 
-- Chatterbox Nano supports Python 3.10+ and can use Python 3.14.
+- On Windows the harness deliberately uses Python 3.10-3.13 for Chatterbox Nano,
+  because a dependency currently falls back to a source build on Python 3.14.
 - NeuTTS 1.4.1 requires Python 3.10-3.13. The harness searches for a compatible
   interpreter without changing your global Python, including Dexter's existing
   tools venv and Windows `py` launcher installations.
 
-If no compatible NeuTTS interpreter exists, `setup neutts` stops with a clear
-message rather than installing anything into another environment.
+If no compatible interpreter exists, setup stops with a clear message rather
+than installing anything into another environment.
 
 ## Metrics
 
