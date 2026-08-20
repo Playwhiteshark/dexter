@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
 import shutil
@@ -17,13 +18,24 @@ REFERENCE_WAV = ROOT / "reference.wav"
 REFERENCE_TXT = ROOT / "reference.txt"
 PHRASES_FILE = ROOT / "phrases.txt"
 
+CHATTERBOX_NANO_COMMIT = "5de7a54aa4e5e2baadb0182dde554908b48b85c2"
+
 ENGINE_FAMILY = {
     "chatterbox": "chatterbox",
     "neutts-nano": "neutts",
     "neutts-2e": "neutts",
 }
 PACKAGE_SPEC = {
-    "chatterbox": "chatterbox-tts==0.1.7",
+    # Nano was added upstream after the PyPI 0.1.7 build without a version bump,
+    # so pin the exact upstream commit that introduced the nano=True API.
+    "chatterbox": (
+        "git+https://github.com/resemble-ai/chatterbox.git@"
+        + CHATTERBOX_NANO_COMMIT
+    ),
+    "neutts": "neutts==1.4.1",
+}
+PACKAGE_LABEL = {
+    "chatterbox": f"Chatterbox Nano upstream@{CHATTERBOX_NANO_COMMIT[:8]}",
     "neutts": "neutts==1.4.1",
 }
 ENGINES = tuple(ENGINE_FAMILY)
@@ -50,10 +62,14 @@ def _python_version(executable: Path) -> tuple[int, int] | None:
 def _supports(family: str, version: tuple[int, int] | None) -> bool:
     if version is None:
         return False
-    if family == "chatterbox":
-        return version >= (3, 10)
     if family == "neutts":
         return (3, 10) <= version < (3, 14)
+    if family == "chatterbox":
+        # Upstream advertises 3.14, but on Windows spacy-pkuseg currently falls
+        # back to a C++ source build. Keep the benchmark compiler-free.
+        if os.name == "nt":
+            return (3, 10) <= version < (3, 14)
+        return version >= (3, 10)
     return False
 
 
@@ -74,7 +90,14 @@ def _launcher_python(version: str) -> Path | None:
 
 
 def _find_base_python(family: str) -> Path | None:
-    candidates: list[Path] = [Path(sys.executable)]
+    candidates: list[Path] = []
+
+    # Prefer a 3.13-3.10 interpreter on Windows for both current engine stacks.
+    if os.name == "nt":
+        for version in ("3.13", "3.12", "3.11", "3.10"):
+            candidate = _launcher_python(version)
+            if candidate is not None:
+                candidates.append(candidate)
 
     dexter_tools_python = (
         REPO_ROOT
@@ -87,15 +110,7 @@ def _find_base_python(family: str) -> Path | None:
     if dexter_tools_python.exists():
         candidates.append(dexter_tools_python)
 
-    versions = (
-        ("3.13", "3.12", "3.11", "3.10")
-        if family == "neutts"
-        else ("3.14", "3.13", "3.12", "3.11", "3.10")
-    )
-    for version in versions:
-        candidate = _launcher_python(version)
-        if candidate is not None:
-            candidates.append(candidate)
+    candidates.append(Path(sys.executable))
 
     seen: set[str] = set()
     for candidate in candidates:
@@ -137,6 +152,35 @@ def _cache_env(family: str) -> dict[str, str]:
         }
     )
     return env
+
+
+def _family_probe_code(family: str) -> str:
+    if family == "chatterbox":
+        return (
+            "import inspect; "
+            "from chatterbox.tts_turbo import ChatterboxTurboTTS; "
+            "assert 'nano' in inspect.signature(ChatterboxTurboTTS.from_pretrained).parameters"
+        )
+    if family == "neutts":
+        return "from neutts import NeuTTS, NeuTTS2E"
+    raise ValueError(f"Unknown family: {family}")
+
+
+def _family_ready(family: str) -> bool:
+    python = _venv_python(family)
+    if not python.exists():
+        return False
+    try:
+        subprocess.run(
+            [str(python), "-c", _family_probe_code(family)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=_cache_env(family),
+        )
+        return True
+    except (OSError, subprocess.CalledProcessError):
+        return False
 
 
 def _dir_size(path: Path) -> int:
@@ -189,43 +233,55 @@ def _resolve_family(name: str) -> str:
 
 def setup(name: str) -> None:
     family = _resolve_family(name)
-    python = _venv_python(family)
-    if python.exists():
-        print(f"{family}: environment already exists at {python.parent.parent}")
+    family_dir = _family_dir(family)
+
+    if _family_ready(family):
+        print(f"{family}: environment already ready at {_venv_python(family).parent.parent}")
         return
+
+    if family_dir.exists():
+        print(f"Removing incomplete/outdated {family} environment: {family_dir}")
+        shutil.rmtree(family_dir)
 
     base_python = _find_base_python(family)
     if base_python is None:
-        if family == "neutts":
-            raise SystemExit(
-                "NeuTTS requires Python 3.10-3.13. No compatible interpreter was found. "
-                "Python 3.14 can still run this benchmark controller, but not NeuTTS 1.4.1."
-            )
-        raise SystemExit("No compatible Python interpreter found for Chatterbox.")
+        raise SystemExit(
+            f"{family} needs Python 3.10-3.13 for this Windows benchmark. "
+            "No compatible interpreter was found."
+        )
 
-    family_dir = _family_dir(family)
     family_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Creating isolated {family} environment with {base_python}")
-    subprocess.run(
-        [str(base_python), "-m", "venv", str(family_dir / ".venv")],
-        check=True,
-    )
+    try:
+        print(f"Creating isolated {family} environment with {base_python}")
+        subprocess.run(
+            [str(base_python), "-m", "venv", str(family_dir / ".venv")],
+            check=True,
+        )
 
-    python = _venv_python(family)
-    print(f"Installing {PACKAGE_SPEC[family]} (pip cache disabled)")
-    subprocess.run(
-        [
-            str(python),
-            "-m",
-            "pip",
-            "install",
-            "--disable-pip-version-check",
-            "--no-cache-dir",
-            PACKAGE_SPEC[family],
-        ],
-        check=True,
-        env=_cache_env(family),
-    )
+        python = _venv_python(family)
+        print(f"Installing {PACKAGE_LABEL[family]} (pip cache disabled)")
+        subprocess.run(
+            [
+                str(python),
+                "-m",
+                "pip",
+                "install",
+                "--disable-pip-version-check",
+                "--no-cache-dir",
+                PACKAGE_SPEC[family],
+            ],
+            check=True,
+            env=_cache_env(family),
+        )
+
+        if not _family_ready(family):
+            raise RuntimeError(f"{family} installed but failed its import/API probe")
+    except Exception:
+        if family_dir.exists():
+            print(f"Setup failed; deleting incomplete environment: {family_dir}")
+            shutil.rmtree(family_dir, ignore_errors=True)
+        raise
+
     print(f"{family}: ready")
 
 
@@ -234,10 +290,9 @@ def run_engine(engine: str) -> None:
         raise SystemExit(f"Unknown engine: {engine}")
 
     family = ENGINE_FAMILY[engine]
-    python = _venv_python(family)
-    if not python.exists():
+    if not _family_ready(family):
         raise SystemExit(
-            f"{family} is not installed. Run:\n"
+            f"{family} is missing or outdated. Run:\n"
             f"  python Development\\TTSBench\\bench.py setup {engine}"
         )
 
@@ -263,7 +318,7 @@ def run_engine(engine: str) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     command = [
-        str(python),
+        str(_venv_python(family)),
         str(Path(__file__).resolve()),
         "_worker",
         engine,
@@ -302,11 +357,16 @@ def status() -> None:
     print(f"Test phrases:    {len(phrases)}")
     print()
     for family in PACKAGE_SPEC:
-        python = _venv_python(family)
-        state = "installed" if python.exists() else "not installed"
+        path = _family_dir(family)
+        if _family_ready(family):
+            state = "ready"
+        elif path.exists():
+            state = "broken/stale"
+        else:
+            state = "not installed"
         print(
             f"{family:11} {state:13} "
-            f"runtime+cache={_human_bytes(_dir_size(_family_dir(family)))}"
+            f"runtime+cache={_human_bytes(_dir_size(path))}"
         )
     print()
     for engine in ENGINES:
@@ -344,9 +404,21 @@ def listen() -> None:
         winsound.PlaySound(str(wav), winsound.SND_FILENAME)
 
 
+def _write_metrics(output_dir: Path, metrics: dict[str, object]) -> None:
+    (output_dir / "metrics.json").write_text(
+        json.dumps(metrics, indent=2), encoding="utf-8"
+    )
+
+
 def _worker_chatterbox(args: argparse.Namespace) -> int:
     import torchaudio as ta
     from chatterbox.tts_turbo import ChatterboxTurboTTS
+
+    signature = inspect.signature(ChatterboxTurboTTS.from_pretrained)
+    if "nano" not in signature.parameters:
+        raise SystemExit(
+            "Installed Chatterbox does not contain the Nano API. Re-run setup chatterbox."
+        )
 
     phrases = _load_phrases(args.phrases)
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -397,16 +469,17 @@ def _worker_chatterbox(args: argparse.Namespace) -> int:
     else:
         print("No reference.wav present; cloned Chatterbox variant skipped.")
 
-    metrics = {
-        "engine": "chatterbox-nano",
-        "device": "cpu",
-        "model_load_seconds": model_load_seconds,
-        "voice_prepare_seconds": voice_prepare_seconds,
-        "reference_used": bool(args.reference_wav and args.reference_wav.exists()),
-        "results": results,
-    }
-    (args.output_dir / "metrics.json").write_text(
-        json.dumps(metrics, indent=2), encoding="utf-8"
+    _write_metrics(
+        args.output_dir,
+        {
+            "engine": "chatterbox-nano",
+            "upstream_commit": CHATTERBOX_NANO_COMMIT,
+            "device": "cpu",
+            "model_load_seconds": model_load_seconds,
+            "voice_prepare_seconds": voice_prepare_seconds,
+            "reference_used": bool(args.reference_wav and args.reference_wav.exists()),
+            "results": results,
+        },
     )
     return 0
 
@@ -466,16 +539,16 @@ def _worker_neutts_nano(args: argparse.Namespace) -> int:
             f"audio={audio_seconds:.3f}s rtf={rtf:.3f}"
         )
 
-    metrics = {
-        "engine": "neutts-nano",
-        "device": "cpu",
-        "model_load_seconds": model_load_seconds,
-        "voice_prepare_seconds": voice_prepare_seconds,
-        "reference_used": True,
-        "results": results,
-    }
-    (args.output_dir / "metrics.json").write_text(
-        json.dumps(metrics, indent=2), encoding="utf-8"
+    _write_metrics(
+        args.output_dir,
+        {
+            "engine": "neutts-nano",
+            "device": "cpu",
+            "model_load_seconds": model_load_seconds,
+            "voice_prepare_seconds": voice_prepare_seconds,
+            "reference_used": True,
+            "results": results,
+        },
     )
     return 0
 
@@ -535,18 +608,18 @@ def _worker_neutts_2e(args: argparse.Namespace) -> int:
                 f"audio={audio_seconds:.3f}s rtf={rtf:.3f}"
             )
 
-    metrics = {
-        "engine": "neutts-2e",
-        "device": "cpu",
-        "model_load_seconds": model_load_seconds,
-        "voice_prepare_seconds": None,
-        "reference_used": False,
-        "speakers": speakers,
-        "emotion": "neutral",
-        "results": results,
-    }
-    (args.output_dir / "metrics.json").write_text(
-        json.dumps(metrics, indent=2), encoding="utf-8"
+    _write_metrics(
+        args.output_dir,
+        {
+            "engine": "neutts-2e",
+            "device": "cpu",
+            "model_load_seconds": model_load_seconds,
+            "voice_prepare_seconds": None,
+            "reference_used": False,
+            "speakers": speakers,
+            "emotion": "neutral",
+            "results": results,
+        },
     )
     return 0
 
@@ -605,6 +678,9 @@ def main() -> int:
     except subprocess.CalledProcessError as exc:
         print(f"\nCommand failed with exit code {exc.returncode}.", file=sys.stderr)
         return exc.returncode or 1
+    except RuntimeError as exc:
+        print(f"\n{exc}", file=sys.stderr)
+        return 1
     return 0
 
 
