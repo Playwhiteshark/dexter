@@ -13,6 +13,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[1]
 RUNTIME_ROOT = ROOT / ".runtime"
+WINDOWS_SHORT_RUNTIME_ROOT = Path(
+    os.environ.get("LOCALAPPDATA") or os.environ.get("TEMP") or str(ROOT)
+) / "DexterTTSBench"
 RESULTS_ROOT = ROOT / "results"
 REFERENCE_WAV = ROOT / "reference.wav"
 REFERENCE_TXT = ROOT / "reference.txt"
@@ -124,6 +127,11 @@ def _find_base_python(family: str) -> Path | None:
 
 
 def _family_dir(family: str) -> Path:
+    # Keep the already-working Chatterbox runtime where it is. NeuTTS pulls in
+    # PyTorch trees deep enough to trip WinError 206 from this repository path,
+    # so on Windows give only NeuTTS a deliberately short disposable root.
+    if os.name == "nt" and family == "neutts":
+        return WINDOWS_SHORT_RUNTIME_ROOT / family
     return RUNTIME_ROOT / family
 
 
@@ -366,7 +374,8 @@ def status() -> None:
             state = "not installed"
         print(
             f"{family:11} {state:13} "
-            f"runtime+cache={_human_bytes(_dir_size(path))}"
+            f"runtime+cache={_human_bytes(_dir_size(path))} "
+            f"path={path}"
         )
     print()
     for engine in ENGINES:
