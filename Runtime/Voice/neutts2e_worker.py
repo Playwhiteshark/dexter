@@ -98,9 +98,16 @@ def main() -> int:
                 codec_device="cpu",
                 seed=42,
             )
-            # Pay first-inference setup cost during Dexter startup, not on the
-            # first spoken answer.
-            tts.warmup()
+            # Pay first-inference setup cost for the selected voice during
+            # Dexter startup, not on the first spoken answer.
+            for _ in tts.infer_stream(
+                "Warming up.",
+                speaker=SPEAKER,
+                emotion=EMOTION,
+                temperature=1.0,
+                top_k=50,
+            ):
+                pass
         load_seconds = time.perf_counter() - started
     except Exception as exc:
         traceback.print_exc(file=sys.stderr)
