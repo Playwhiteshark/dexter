@@ -49,7 +49,11 @@ NeuTTS-2E / Paul is functionally integrated. Current CPU results:
 
 The first full-app audit showed the NeuTTS worker reaching roughly 74% whole-machine CPU while speaking and no GPU-engine activity. This makes TTS the strongest first candidate for offloading to otherwise-idle accelerator hardware.
 
-The audible stop/start needs to be isolated before changing playback policy. A dedicated stream-capture diagnostic records the exact yielded PCM without live playback and logs per-chunk arrival time versus audio duration. If the recorded WAV is choppy, the defect is already in the NeuTTS streaming/codec path; if the WAV is smooth, Dexter's playback scheduling is at fault.
+A dedicated capture diagnostic concatenated the exact Q8 streamed PCM into a WAV without real-time playback. That WAV sounded smooth. Therefore the model/codec output itself is good and the audible stop/start belongs to Dexter's live playback scheduling rather than NeuTTS's generated waveform.
+
+Production live playback now uses a callback-driven bounded PCM jitter buffer rather than writing each model chunk directly through SoundDevice's blocking `OutputStream.write()` path. It prebuffers a small reserve, feeds PortAudio continuously from the callback, and after a true underflow waits for a useful reserve before resuming instead of rapidly alternating sound and silence. PTT interruption still aborts the output stream and clears the reserve immediately.
+
+This playback buffer is not a substitute for inference acceleration. With Q8 still at RTF ~1.48, a sufficiently long response can still consume its reserve faster than TTS replenishes it. The goal of the Arc experiment is to move Q8 below real-time so prebuffering becomes protection against jitter rather than compensation for sustained slow inference.
 
 The likely first accelerator experiment remains the **GGUF backbone on the Intel Arc iGPU**. `llama.cpp` supports Intel GPUs through Vulkan and SYCL. Vulkan should be benchmarked before installing a compiler/oneAPI toolchain for a custom SYCL Python build.
 
@@ -108,9 +112,9 @@ The profiler ending does not stop Dexter or TTS; it only stops recording samples
 
 ## Optimization order after baseline
 
-1. Isolate whether the current TTS choppiness is encoded in NeuTTS's yielded audio or introduced by live playback.
+1. Validate the callback/jitter-buffer playback path in the live Host.
 2. Benchmark NeuTTS Q8 on the Arc iGPU, keeping the ONNX decoder unchanged initially.
-3. If Q8 becomes comfortably real-time and audio quality is clean, integrate explicit device selection.
+3. If Q8 becomes comfortably real-time and audio quality is clean, integrate explicit device selection and reduce the playback reserve as far as practical.
 4. Profile and lazy-load heavyweight optional MCP tool implementations.
 5. Profile Host/STT memory and latency. Keep Moonshine resident if its load cost and PTT-latency benefit justify it; only consider unload/reload after measuring both costs.
 6. Audit the main LLM's RTX/host-RAM split and context allocation separately. Do not mix that experiment with TTS changes.
