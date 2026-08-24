@@ -46,8 +46,8 @@ function Get-RelevantProcessRows {
 
     $rows = @()
     foreach ($proc in (Get-Process -ErrorAction SilentlyContinue)) {
-        $pid = [int]$proc.Id
-        $cim = $cimByPid[$pid]
+        $processId = [int]$proc.Id
+        $cim = $cimByPid[$processId]
         if ($null -eq $cim) { continue }
 
         $commandLine = [string]$cim.CommandLine
@@ -65,7 +65,7 @@ function Get-RelevantProcessRows {
         }
 
         $rows += [pscustomobject]@{
-            pid = $pid
+            pid = $processId
             ppid = [int]$cim.ParentProcessId
             role = $role
             name = [string]$cim.Name
@@ -88,13 +88,13 @@ function Get-GpuUsageByPid {
         foreach ($sample in $counter.CounterSamples) {
             $instance = [string]$sample.InstanceName
             if ($instance -notmatch 'pid_(\d+)') { continue }
-            $pid = [int]$Matches[1]
+            $processId = [int]$Matches[1]
             $value = [double]$sample.CookedValue
             if ([double]::IsNaN($value) -or [double]::IsInfinity($value)) { continue }
-            if (-not $result.ContainsKey($pid) -or $value -gt $result[$pid]) {
+            if (-not $result.ContainsKey($processId) -or $value -gt $result[$processId]) {
                 # Use the busiest engine instead of summing engines, which can
                 # exceed 100% and is misleading for a quick process comparison.
-                $result[$pid] = [math]::Round($value, 1)
+                $result[$processId] = [math]::Round($value, 1)
             }
         }
     } catch {
@@ -170,30 +170,30 @@ while ((Get-Date) -lt $deadline) {
     $sampleRows = @()
 
     foreach ($row in $rows) {
-        $pid = [int]$row.pid
-        $key = "$pid|$($row.role)"
+        $processId = [int]$row.pid
+        $key = "$processId|$($row.role)"
         $nowCpu = [double]$row.cpu_seconds
         $cpuPct = 0.0
 
-        if ($previousCpu.ContainsKey($pid) -and $previousAt.ContainsKey($pid)) {
-            $elapsed = ($sampleAt - $previousAt[$pid]).TotalSeconds
+        if ($previousCpu.ContainsKey($processId) -and $previousAt.ContainsKey($processId)) {
+            $elapsed = ($sampleAt - $previousAt[$processId]).TotalSeconds
             if ($elapsed -gt 0) {
-                $delta = $nowCpu - [double]$previousCpu[$pid]
+                $delta = $nowCpu - [double]$previousCpu[$processId]
                 if ($delta -ge 0) {
                     # Normalize to Task-Manager-like whole-machine percentage.
                     $cpuPct = [math]::Round(($delta / $elapsed / $logicalProcessors) * 100.0, 1)
                 }
             }
         }
-        $previousCpu[$pid] = $nowCpu
-        $previousAt[$pid] = $sampleAt
+        $previousCpu[$processId] = $nowCpu
+        $previousAt[$processId] = $sampleAt
 
         $gpuPct = 0.0
-        if ($gpuByPid.ContainsKey($pid)) { $gpuPct = [double]$gpuByPid[$pid] }
+        if ($gpuByPid.ContainsKey($processId)) { $gpuPct = [double]$gpuByPid[$processId] }
 
         if (-not $stats.ContainsKey($key)) {
             $stats[$key] = [ordered]@{
-                pid = $pid
+                pid = $processId
                 ppid = [int]$row.ppid
                 role = [string]$row.role
                 name = [string]$row.name
@@ -219,7 +219,7 @@ while ((Get-Date) -lt $deadline) {
         }
 
         $sampleRows += [pscustomobject]@{
-            pid = $pid
+            pid = $processId
             role = [string]$row.role
             private_mb = [double]$row.private_mb
             working_set_mb = [double]$row.working_set_mb
