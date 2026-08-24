@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import json
+import os
 import queue
 import sys
 import threading
@@ -20,7 +21,16 @@ import time
 import traceback
 from typing import Any
 
-MODEL_REPO = "neuphonic/neutts-2e-q8-gguf"
+MODEL_REPOS = {
+    "q8": "neuphonic/neutts-2e-q8-gguf",
+    "q4": "neuphonic/neutts-2e-q4-gguf",
+}
+VARIANT = os.environ.get("DEXTER_TTS_VARIANT", "q8").strip().lower()
+if VARIANT not in MODEL_REPOS:
+    raise SystemExit(
+        f"Unsupported DEXTER_TTS_VARIANT={VARIANT!r}; expected one of {sorted(MODEL_REPOS)}"
+    )
+MODEL_REPO = MODEL_REPOS[VARIANT]
 CODEC_REPO = "neuphonic/neucodec-onnx-decoder-int8"
 SPEAKER = "paul"
 EMOTION = "neutral"
@@ -113,6 +123,7 @@ def main() -> int:
             "emotion": EMOTION,
             "sample_rate": SAMPLE_RATE,
             "model": MODEL_REPO,
+            "variant": VARIANT,
             "codec": CODEC_REPO,
             "mode": "stream",
             "load_seconds": load_seconds,
