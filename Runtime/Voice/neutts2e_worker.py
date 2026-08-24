@@ -168,7 +168,6 @@ def main() -> int:
                 codec_device="cpu",
                 seed=42,
             )
-            # NeuTTS2E.warmup() uses infer_stream() for quantized backbones.
             tts.warmup()
         load_seconds = time.perf_counter() - started
     except Exception as exc:
@@ -296,26 +295,31 @@ def main() -> int:
                     temperature=1.0,
                     top_k=50,
                 )
-                for wav in stream:
-                    with cancel_lock:
-                        if request_id in cancelled:
-                            cancelled_during_run = True
-                            break
+                try:
+                    for wav in stream:
+                        with cancel_lock:
+                            if request_id in cancelled:
+                                cancelled_during_run = True
+                                break
 
-                    samples = np.asarray(wav, dtype=np.float32).reshape(-1)
-                    if samples.size == 0:
-                        continue
-                    if first_audio_seconds is None:
-                        first_audio_seconds = time.perf_counter() - started
-                    chunk_count += 1
-                    _emit(
-                        {
-                            "type": "audio",
-                            "id": request_id,
-                            "sample_rate": SAMPLE_RATE,
-                            "pcm_f32le": base64.b64encode(samples.tobytes()).decode("ascii"),
-                        }
-                    )
+                        samples = np.asarray(wav, dtype=np.float32).reshape(-1)
+                        if samples.size == 0:
+                            continue
+                        if first_audio_seconds is None:
+                            first_audio_seconds = time.perf_counter() - started
+                        chunk_count += 1
+                        _emit(
+                            {
+                                "type": "audio",
+                                "id": request_id,
+                                "sample_rate": SAMPLE_RATE,
+                                "pcm_f32le": base64.b64encode(samples.tobytes()).decode("ascii"),
+                            }
+                        )
+                finally:
+                    close = getattr(stream, "close", None)
+                    if callable(close):
+                        close()
         except Exception as exc:
             traceback.print_exc(file=sys.stderr)
             _emit({"type": "error", "id": request_id, "message": str(exc)})
