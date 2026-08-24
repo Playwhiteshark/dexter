@@ -5,9 +5,9 @@ NeuTTS 1.4.1 hardcodes ``verbose=False`` when it constructs its GGUF
 log to prove device selection and layer offload, so this wrapper forces
 ``verbose=True`` before delegating to the production worker.
 
-``DEXTER_TTS_PIPELINE_WATERMARK=1`` additionally installs the diagnostic
-Arc-generation / CPU-watermark pipeline. Perth remains loaded and applied to
-all streamed audio; only scheduling changes.
+``DEXTER_TTS_PIPELINE_WATERMARK=1`` installs the same production
+Arc-generation / CPU-watermark pipeline used by Dexter. Perth remains loaded
+and applied to all streamed audio; only scheduling changes.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ def _verbose_llama_init(self, *args, **kwargs):
 llama_cpp.Llama.__init__ = _verbose_llama_init
 
 if os.environ.get("DEXTER_TTS_PIPELINE_WATERMARK", "0").strip() == "1":
-    from Diagnostics.neutts2e_pipelined_stream import install
+    from Runtime.Voice.neutts2e_pipelined_stream import install
 
     install()
 
