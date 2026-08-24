@@ -1,14 +1,16 @@
 """Profile Dexter NeuTTS streaming stages without live playback.
 
-This diagnostic uses the production worker/protocol but never opens an audio
-output device. The worker reports cumulative NeuCodec decode time separately
-from total synthesis time so we can estimate how much latency is attributable
-to the GGUF/token-generation side versus audio reconstruction and other work.
+The diagnostic can run the production CPU path or the verified Intel Arc
+Vulkan path. It separates codec decode time from llama-cpp-python hot-loop
+work: native eval, sampling, tokenization/detokenization, and remaining Python /
+streaming orchestration.
 """
 
 from __future__ import annotations
 
+import argparse
 import base64
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -20,24 +22,71 @@ if str(REPO_ROOT) not in sys.path:
 from Runtime.Voice import neutts2e_runtime as runtime
 
 
+def _start(device: str):
+    env = runtime.runtime_env("q8")
+    env["DEXTER_TTS_PROFILE_STAGES"] = "1"
+    env["DEXTER_TTS_PROFILE_LLAMA_STAGES"] = "1"
+    if device == "arc":
+        env["DEXTER_TTS_BACKBONE_DEVICE"] = "gpu"
+        env["DEXTER_TTS_VULKAN_DEVICE"] = "0"
+        env["GGML_VK_VISIBLE_DEVICES"] = "0"
+    else:
+        env["DEXTER_TTS_BACKBONE_DEVICE"] = "cpu"
+        env.pop("DEXTER_TTS_VULKAN_DEVICE", None)
+        env.pop("GGML_VK_VISIBLE_DEVICES", None)
+
+    process = subprocess.Popen(
+        [sys.executable, "-u", str(runtime.WORKER)],
+        cwd=str(runtime.REPO_ROOT),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=None,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+        env=env,
+    )
+    return process, runtime._ProtocolReader(process)
+
+
+def _seconds(message: dict[str, object], name: str) -> float:
+    return float(message.get(name) or 0.0)
+
+
+def _calls(message: dict[str, object], name: str) -> int:
+    return int(message.get(name) or 0)
+
+
 def main() -> int:
-    variant = "q8"
-    runtime.doctor(variant)
-    process, reader = runtime._start_worker(variant)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--device",
+        choices=("cpu", "arc"),
+        default="cpu",
+        help="Backbone execution path to profile. Arc uses Vulkan visible device 0.",
+    )
+    args = parser.parse_args()
+
+    runtime.doctor("q8")
+    process, reader = _start(args.device)
     try:
         ready = reader.get(timeout=180)
         if ready.get("type") != "ready":
             raise SystemExit(f"Worker failed to start: {ready}")
 
         print(
-            f"Ready: Paul / Q8 in {float(ready['load_seconds']):.2f}s. "
-            "Profiling synthesis stages..."
+            f"Ready: Paul / Q8 in {float(ready['load_seconds']):.2f}s; "
+            f"backbone={ready.get('backbone_device')}; "
+            f"threads={ready.get('actual_threads')}; "
+            f"gpu_offload_supported={ready.get('gpu_offload_supported')}."
         )
 
         text = (
             "Right, I've found the problem. It was using the old configuration file. "
-            "This profile measures how much time Dexter spends generating speech "
-            "tokens compared with reconstructing the final audio."
+            "This profile measures the model evaluation, token sampling, Python "
+            "streaming loop, and audio reconstruction separately so Dexter can "
+            "optimize the part that is actually limiting real-time speech."
         )
         request_id = 1
         started = time.perf_counter()
@@ -77,36 +126,58 @@ def main() -> int:
 
             if kind in {"error", "fatal"}:
                 raise SystemExit(f"Worker error: {message.get('message')}")
-
             if kind != "done":
                 continue
 
             total = time.perf_counter() - started
             audio_seconds = audio_samples / runtime.SAMPLE_RATE
             rtf = total / audio_seconds if audio_seconds else float("inf")
-            decode_seconds = float(message.get("decode_seconds") or 0.0)
-            decode_calls = int(message.get("decode_calls") or 0)
-            non_decode = max(0.0, total - decode_seconds)
-            decode_share = (decode_seconds / total * 100.0) if total else 0.0
-            non_decode_share = (non_decode / total * 100.0) if total else 0.0
+
+            decode = _seconds(message, "decode_seconds")
+            eval_seconds = _seconds(message, "eval_seconds")
+            sample = _seconds(message, "sample_seconds")
+            tokenize = _seconds(message, "tokenize_seconds")
+            detokenize = _seconds(message, "detokenize_seconds")
+            measured = decode + eval_seconds + sample + tokenize + detokenize
+            remainder = max(0.0, total - measured)
+
+            def pct(value: float) -> float:
+                return value / total * 100.0 if total else 0.0
 
             print("")
             print(f"First audio:                  {first_audio:.3f}s")
             print(f"Generated audio:              {audio_seconds:.3f}s")
             print(f"Total synthesis:              {total:.3f}s  (RTF {rtf:.3f})")
+            print("")
             print(
-                f"NeuCodec decode:              {decode_seconds:.3f}s  "
-                f"({decode_share:.1f}%, {decode_calls} calls)"
+                f"llama eval:                   {eval_seconds:.3f}s  "
+                f"({pct(eval_seconds):5.1f}%, {_calls(message, 'eval_calls')} calls)"
             )
             print(
-                f"Token generation + other:     {non_decode:.3f}s  "
-                f"({non_decode_share:.1f}%)"
+                f"llama sampling:               {sample:.3f}s  "
+                f"({pct(sample):5.1f}%, {_calls(message, 'sample_calls')} calls)"
+            )
+            print(
+                f"llama tokenize:               {tokenize:.3f}s  "
+                f"({pct(tokenize):5.1f}%, {_calls(message, 'tokenize_calls')} calls)"
+            )
+            print(
+                f"llama detokenize:             {detokenize:.3f}s  "
+                f"({pct(detokenize):5.1f}%, {_calls(message, 'detokenize_calls')} calls)"
+            )
+            print(
+                f"NeuCodec decode:              {decode:.3f}s  "
+                f"({pct(decode):5.1f}%, {_calls(message, 'decode_calls')} calls)"
+            )
+            print(
+                f"Python/streaming remainder:   {remainder:.3f}s  "
+                f"({pct(remainder):5.1f}%)"
             )
             print("")
             print(
-                "Interpretation: if NeuCodec is a small share, accelerating the "
-                "GGUF backbone is the highest-leverage next step. If NeuCodec is "
-                "a large share, the ONNX decoder also needs acceleration/tuning."
+                "The remainder includes NeuTTS chunk bookkeeping, overlap-add / "
+                "watermark work, llama-cpp-python completion formatting, protocol "
+                "serialization, and timing overhead not inside the wrapped calls."
             )
             return 0
     finally:
