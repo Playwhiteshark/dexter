@@ -3,22 +3,20 @@
 This benchmark keeps the voice, Q8 model, text, ONNX NeuCodec decoder, and
 worker protocol fixed. Only the GGUF backbone execution changes.
 
-Cases:
-- CPU / NeuTTS default thread heuristic
-- CPU / explicit 16 generation threads
-- Intel Arc candidate / Vulkan visible device 0
-- Optional RTX control / Vulkan visible device 1
-
-GPU cases refuse to report a timing as an accelerator result unless the loaded
-llama.cpp library reports GPU-offload support and the ggml backend registry
-shows the expected accelerator device.
+GPU cases use a diagnostic-only worker that forces llama.cpp verbosity, then
+verify the native model-load log itself. A result is accepted as GPU-backed
+only when llama.cpp names the expected accelerator and reports model layers
+actually offloaded to GPU.
 """
 
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +26,8 @@ if repo_root_text not in sys.path:
     sys.path.insert(0, repo_root_text)
 
 from Runtime.Voice import neutts2e_runtime as runtime
+
+VERBOSE_WORKER = REPO_ROOT / "Diagnostics" / "neutts2e_verbose_worker.py"
 
 
 @dataclass(frozen=True)
@@ -70,6 +70,32 @@ CASES = (
 )
 
 
+class _StderrCapture:
+    """Tee a child process's native stderr to our stderr while retaining it."""
+
+    def __init__(self, process: subprocess.Popen[str]) -> None:
+        self.process = process
+        self._lines: list[str] = []
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        assert self.process.stderr is not None
+        for line in self.process.stderr:
+            with self._lock:
+                self._lines.append(line)
+            sys.stderr.write(line)
+            sys.stderr.flush()
+
+    def text(self) -> str:
+        with self._lock:
+            return "".join(self._lines)
+
+    def join(self, timeout: float = 1.0) -> None:
+        self._thread.join(timeout=timeout)
+
+
 def _start(case: Case):
     env = runtime.runtime_env("q8")
     env["DEXTER_TTS_BACKBONE_DEVICE"] = case.device
@@ -85,94 +111,97 @@ def _start(case: Case):
         env.pop("DEXTER_TTS_VULKAN_DEVICE", None)
         env.pop("GGML_VK_VISIBLE_DEVICES", None)
 
+    worker = VERBOSE_WORKER if case.device == "gpu" else runtime.WORKER
     process = subprocess.Popen(
-        [sys.executable, "-u", str(runtime.WORKER)],
+        [sys.executable, "-u", str(worker)],
         cwd=str(runtime.REPO_ROOT),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=None,
+        stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="replace",
         bufsize=1,
         env=env,
     )
-    return process, runtime._ProtocolReader(process)
+    return process, runtime._ProtocolReader(process), _StderrCapture(process)
 
 
-def _device_summary(ready: dict[str, object]) -> str:
-    devices = ready.get("backend_devices")
-    if not isinstance(devices, list):
-        return "none reported"
-    lines = []
-    for item in devices:
-        if not isinstance(item, dict):
-            continue
-        lines.append(
-            f"[{item.get('index')}] {item.get('backend')}/{item.get('type')}: "
-            f"{item.get('name')} — {item.get('description')}"
-        )
-    return "\n".join(lines) if lines else "none reported"
+def _offload_evidence(stderr_text: str) -> list[str]:
+    evidence = []
+    for line in stderr_text.splitlines():
+        low = line.lower()
+        if (
+            "vulkan" in low
+            or "using device" in low
+            or "offload" in low
+            or "gpu model buffer" in low
+            or "model buffer size" in low and "vulkan" in low
+        ):
+            evidence.append(line.strip())
+    return evidence
 
 
-def _verify_gpu_ready(case: Case, ready: dict[str, object]) -> None:
+def _verify_gpu_ready(
+    case: Case,
+    ready: dict[str, object],
+    stderr_text: str,
+) -> None:
     if case.device != "gpu":
         return
 
-    supported = bool(ready.get("gpu_offload_supported"))
-    requested_layers = int(ready.get("requested_gpu_layers") or 0)
-    devices = ready.get("backend_devices")
-    device_error = ready.get("backend_device_error")
-
-    if not supported:
+    if not bool(ready.get("gpu_offload_supported")):
         raise RuntimeError(
             "This installed llama-cpp-python library reports GPU offload support = false. "
             "The GPU timing would actually be a CPU fallback."
         )
+
+    requested_layers = int(ready.get("requested_gpu_layers") or 0)
     if requested_layers <= 0:
         raise RuntimeError(
             f"NeuTTS did not request GPU layer offload (n_gpu_layers={requested_layers})."
         )
-    if device_error:
-        raise RuntimeError(
-            "Could not enumerate ggml backend devices from this llama.cpp build: "
-            f"{device_error}"
-        )
-    if not isinstance(devices, list) or not devices:
-        raise RuntimeError("llama.cpp reported GPU support but no backend devices were enumerated.")
 
-    accelerator_texts: list[str] = []
-    for item in devices:
-        if not isinstance(item, dict):
-            continue
-        device_type = str(item.get("type") or "").lower()
-        if device_type not in {"gpu", "igpu"}:
-            continue
-        accelerator_texts.append(
-            " ".join(
-                str(item.get(field) or "")
-                for field in ("backend", "name", "description")
-            ).lower()
+    low = stderr_text.lower()
+    if case.expected_device_text and case.expected_device_text.lower() not in low:
+        raise RuntimeError(
+            f"llama.cpp did not name the expected accelerator containing "
+            f"{case.expected_device_text!r}. Native load evidence:\n"
+            + "\n".join(_offload_evidence(stderr_text))
+        )
+    if case.forbidden_device_text and case.forbidden_device_text.lower() in low:
+        raise RuntimeError(
+            f"llama.cpp named forbidden accelerator text {case.forbidden_device_text!r}; "
+            "do not benchmark TTS against the RTX used by Ollama."
         )
 
-    if not accelerator_texts:
+    if "vulkan" not in low:
         raise RuntimeError(
-            "GPU offload is supported, but the ggml registry exposes no GPU/iGPU device.\n"
-            + _device_summary(ready)
+            "GPU support is present, but the verbose native load log contains no Vulkan "
+            "device/backend evidence."
         )
 
-    combined = "\n".join(accelerator_texts)
-    if case.expected_device_text and case.expected_device_text.lower() not in combined:
+    offload_match = re.search(
+        r"offloaded\s+(\d+)\s*/\s*(\d+)\s+layers\s+to\s+gpu",
+        low,
+    )
+    if offload_match is None:
         raise RuntimeError(
-            f"Expected accelerator containing {case.expected_device_text!r}, but ggml exposed:\n"
-            + _device_summary(ready)
+            "llama.cpp named the accelerator but did not report model layers actually "
+            "offloaded to GPU. Native load evidence:\n"
+            + "\n".join(_offload_evidence(stderr_text))
         )
-    if case.forbidden_device_text and case.forbidden_device_text.lower() in combined:
+
+    offloaded = int(offload_match.group(1))
+    total = int(offload_match.group(2))
+    if offloaded <= 0 or total <= 0:
         raise RuntimeError(
-            f"Forbidden accelerator containing {case.forbidden_device_text!r} is visible; "
-            "do not benchmark TTS against the RTX used by Ollama.\n"
-            + _device_summary(ready)
+            f"Invalid llama.cpp offload report: {offloaded}/{total} layers."
         )
+
+    print("Verified native llama.cpp offload evidence:")
+    for line in _offload_evidence(stderr_text):
+        print(f"  {line}")
 
 
 def _run(case: Case) -> dict[str, float | str | int | None]:
@@ -180,11 +209,15 @@ def _run(case: Case) -> dict[str, float | str | int | None]:
     print("=" * 72)
     print(case.label)
     print("=" * 72)
-    process, reader = _start(case)
+    process, reader, stderr_capture = _start(case)
     try:
         ready = reader.get(timeout=180)
         if ready.get("type") != "ready":
             raise RuntimeError(f"Worker failed to start: {ready}")
+
+        # All model-load logs precede the ready protocol message. Give the tee
+        # thread one scheduling turn to consume any final buffered stderr line.
+        time.sleep(0.05)
 
         print(
             f"Ready in {float(ready['load_seconds']):.2f}s; "
@@ -194,13 +227,8 @@ def _run(case: Case) -> dict[str, float | str | int | None]:
             f"gpu_offload_supported={ready.get('gpu_offload_supported')}; "
             f"requested_gpu_layers={ready.get('requested_gpu_layers')}"
         )
-        print("ggml backend devices:")
-        print(_device_summary(ready))
-        if ready.get("backend_device_error"):
-            print(f"backend enumeration error: {ready.get('backend_device_error')}")
-        print(f"llama.cpp feature info: {ready.get('llama_system_info')}")
 
-        _verify_gpu_ready(case, ready)
+        _verify_gpu_ready(case, ready, stderr_capture.text())
 
         chunks, first_audio, total, timings = runtime._read_stream_request(
             process,
@@ -238,6 +266,7 @@ def _run(case: Case) -> dict[str, float | str | int | None]:
         }
     finally:
         runtime._shutdown(process)
+        stderr_capture.join()
 
 
 def main() -> int:
@@ -253,8 +282,8 @@ def main() -> int:
     runtime.doctor("q8")
     print("")
     print(
-        "GPU results are accepted only if llama.cpp reports offload support and "
-        "the ggml registry exposes the expected accelerator."
+        "GPU timings are accepted only after native llama.cpp load logs prove the "
+        "expected device and actual layer offload."
     )
 
     if args.case == "all":
@@ -262,9 +291,7 @@ def main() -> int:
     else:
         selected = tuple(case for case in CASES if case.key == args.case)
 
-    results = []
-    for case in selected:
-        results.append(_run(case))
+    results = [_run(case) for case in selected]
 
     print("")
     print("=" * 72)
@@ -283,7 +310,7 @@ def main() -> int:
     if float(best["rtf"]) >= 1.0:
         print(
             "No selected path is real-time yet. Do not solve that with a larger "
-            "permanent playback buffer; verify/compare the next acceleration backend."
+            "permanent playback buffer; compare the next acceleration backend."
         )
     return 0
 
