@@ -6,6 +6,7 @@ import base64
 import json
 import os
 import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -21,7 +22,7 @@ RUNTIME_ROOT = Path(
 
 
 class NeuTTS2EBackend:
-    """Stream Paul/neutral PCM from a dedicated Python 3.13 NeuTTS process."""
+    """Stream Paul/neutral PCM from a child process in Dexter's own environment."""
 
     def __init__(self) -> None:
         self._process: subprocess.Popen[str] | None = None
@@ -32,8 +33,10 @@ class NeuTTS2EBackend:
 
     @staticmethod
     def runtime_python() -> Path:
-        suffix = "Scripts/python.exe" if os.name == "nt" else "bin/python"
-        return RUNTIME_ROOT / ".venv" / suffix
+        # TTS is process-isolated, not environment-isolated. uv pins the entire
+        # Dexter application to Python 3.13, so the worker uses the exact same
+        # interpreter and installed dependency set as the Host.
+        return Path(sys.executable)
 
     @staticmethod
     def runtime_env() -> dict[str, str]:
@@ -64,10 +67,10 @@ class NeuTTS2EBackend:
             raise RuntimeError("NeuTTS-2E backend is already running")
 
         python = self.runtime_python()
-        if not python.exists():
+        if sys.version_info[:2] != (3, 13):
             raise RuntimeError(
-                "NeuTTS-2E runtime is not installed. Run: "
-                "python3.13 Runtime\\Voice\\setup_neutts2e.py setup"
+                "Dexter NeuTTS-2E requires the project Python 3.13 environment. "
+                "Run Dexter with `uv run`, after `uv sync`."
             )
         if not WORKER_PATH.exists():
             raise RuntimeError(f"Missing NeuTTS-2E worker: {WORKER_PATH}")
@@ -142,11 +145,16 @@ class NeuTTS2EBackend:
                             continue
                         raw = base64.b64decode(message["pcm_f32le"])
                         samples = np.frombuffer(raw, dtype="<f4").copy()
-                        yield AudioChunk(samples=samples, sample_rate=int(message["sample_rate"]))
+                        yield AudioChunk(
+                            samples=samples,
+                            sample_rate=int(message["sample_rate"]),
+                        )
                     elif kind == "done":
                         return
                     elif kind in {"error", "fatal"}:
-                        raise RuntimeError(str(message.get("message") or "NeuTTS-2E worker error"))
+                        raise RuntimeError(
+                            str(message.get("message") or "NeuTTS-2E worker error")
+                        )
                     else:
                         raise RuntimeError(f"Unexpected NeuTTS-2E message: {message}")
             finally:
@@ -206,7 +214,9 @@ class NeuTTS2EBackend:
         line = stdout.readline()
         if not line:
             code = process.poll()
-            raise RuntimeError(f"NeuTTS-2E worker closed its protocol stream (exit={code})")
+            raise RuntimeError(
+                f"NeuTTS-2E worker closed its protocol stream (exit={code})"
+            )
         try:
             value = json.loads(line)
         except json.JSONDecodeError as exc:
