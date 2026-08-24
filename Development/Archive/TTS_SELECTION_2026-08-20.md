@@ -14,9 +14,11 @@ The user preferred Paul after listening to the generated Chatterbox Nano and Neu
 
 ## Production shape
 
-The benchmark used the PyTorch NeuTTS-2E backbone for listening comparisons. Production uses the official **Q8 GGUF** NeuTTS-2E backbone with the **int8 ONNX NeuCodec decoder** because NeuTTS implements chunked streaming only for its GGUF path. Q8 is the initial choice to stay close to the quality of the selected voice; Q4 remains a simple fallback if CPU latency warrants it.
+Production intentionally uses the same **PyTorch NeuTTS-2E backbone** used in the listening test, paired with the **int8 ONNX NeuCodec decoder**. This keeps the selected voice path compiler-free on Windows and avoids introducing `llama-cpp-python` purely for within-utterance streaming.
 
-The heavy TTS dependency stack is intentionally isolated from Dexter Host in a persistent Python 3.13 worker under the machine-local Dexter voice runtime. The host-side `SpeechBackend` adapter exchanges streamed float32 PCM with that worker while the existing `VoiceOutput` core owns sentence buffering, playback, and interruption.
+Dexter's existing `VoiceOutput` already buffers streamed LLM text into sentence-sized units, synthesizes sentence N+1 while sentence N is playing, and owns playback interruption. That sentence-level pipeline is the initial production strategy. NeuTTS's GGUF-only chunk streaming can be revisited later only if measured sentence latency justifies the added native runtime complexity.
+
+The heavy TTS dependency stack is intentionally isolated from Dexter Host in a persistent Python 3.13 worker under the machine-local Dexter voice runtime. The host-side `SpeechBackend` adapter exchanges float32 PCM with that worker while the existing `VoiceOutput` core owns sentence buffering, playback, and interruption.
 
 ## Retired benchmark
 
