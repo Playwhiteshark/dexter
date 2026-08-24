@@ -1,8 +1,8 @@
 """Validate and manage Dexter's NeuTTS-2E / Paul runtime.
 
 Environment creation is intentionally not handled here. Dexter's root
-pyproject.toml + uv.lock own the Python environment. This script only manages
-voice model authentication/cache and exercises the child-process protocol.
+pyproject.toml + uv.lock own the Python environment. This script manages voice
+model authentication/cache and exercises the child-process protocol.
 """
 
 from __future__ import annotations
@@ -41,21 +41,26 @@ EXPECTED_PACKAGES = (
     "torchaudio",
 )
 
-MODEL_ACCESS_FILES = (
-    (
+MODEL_VARIANTS = {
+    "q8": (
         "neuphonic/neutts-2e-q8-gguf",
         "neutts-2e-Q8_0.gguf",
         "https://huggingface.co/neuphonic/neutts-2e-q8-gguf",
     ),
-    (
-        "neuphonic/neucodec-onnx-decoder-int8",
-        "model.onnx",
-        "https://huggingface.co/neuphonic/neucodec-onnx-decoder-int8",
+    "q4": (
+        "neuphonic/neutts-2e-q4-gguf",
+        "neutts-2e-Q4_0.gguf",
+        "https://huggingface.co/neuphonic/neutts-2e-q4-gguf",
     ),
+}
+CODEC_ACCESS = (
+    "neuphonic/neucodec-onnx-decoder-int8",
+    "model.onnx",
+    "https://huggingface.co/neuphonic/neucodec-onnx-decoder-int8",
 )
 
 
-def runtime_env() -> dict[str, str]:
+def runtime_env(variant: str | None = None) -> dict[str, str]:
     cache = RUNTIME_ROOT / "cache"
     hf_home = cache / "huggingface"
     torch_home = cache / "torch"
@@ -76,6 +81,8 @@ def runtime_env() -> dict[str, str]:
             "TOKENIZERS_PARALLELISM": "false",
         }
     )
+    if variant is not None:
+        env["DEXTER_TTS_VARIANT"] = variant
     return env
 
 
@@ -87,7 +94,7 @@ def _hf_token_path() -> Path:
     return RUNTIME_ROOT / "cache" / "huggingface" / "token"
 
 
-def _check_model_access(failures: list[str]) -> None:
+def _check_model_access(failures: list[str], variant: str) -> None:
     """Verify gated model access without downloading model payloads."""
     token_path = _hf_token_path()
     if not token_path.exists():
@@ -112,7 +119,7 @@ def _check_model_access(failures: list[str]) -> None:
     cache_dir = RUNTIME_ROOT / "cache" / "huggingface" / "hub"
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    for repo_id, filename, access_url in MODEL_ACCESS_FILES:
+    for repo_id, filename, access_url in (MODEL_VARIANTS[variant], CODEC_ACCESS):
         try:
             info = hf_hub_download(
                 repo_id=repo_id,
@@ -142,10 +149,11 @@ def _check_model_access(failures: list[str]) -> None:
             print(f"HF model access:         OK  {repo_id}{suffix}")
 
 
-def doctor() -> None:
+def doctor(variant: str = "q8") -> None:
     failures: list[str] = []
 
     print(f"Python: {sys.version.split()[0]} ({sys.executable})")
+    print(f"TTS variant: {variant.upper()}")
     if not _project_python_ok():
         failures.append("Dexter must run from the uv-managed Python 3.13 environment.")
 
@@ -180,7 +188,7 @@ def doctor() -> None:
     print(f"Voice data: {RUNTIME_ROOT}")
 
     if not failures:
-        _check_model_access(failures)
+        _check_model_access(failures, variant)
 
     if failures:
         for failure in failures:
@@ -213,11 +221,7 @@ def auth() -> None:
     executable = Path(sys.executable).with_name(suffix)
     if not executable.exists():
         raise SystemExit("The Hugging Face CLI is not installed in Dexter's environment.")
-    subprocess.run(
-        [str(executable), "auth", "login"],
-        check=True,
-        env=runtime_env(),
-    )
+    subprocess.run([str(executable), "auth", "login"], check=True, env=runtime_env())
 
 
 class _ProtocolReader:
@@ -259,7 +263,7 @@ class _ProtocolReader:
         return value
 
 
-def _start_worker() -> tuple[subprocess.Popen[str], _ProtocolReader]:
+def _start_worker(variant: str) -> tuple[subprocess.Popen[str], _ProtocolReader]:
     if not WORKER.exists():
         raise SystemExit(f"Missing worker: {WORKER}")
     process = subprocess.Popen(
@@ -272,7 +276,7 @@ def _start_worker() -> tuple[subprocess.Popen[str], _ProtocolReader]:
         encoding="utf-8",
         errors="replace",
         bufsize=1,
-        env=runtime_env(),
+        env=runtime_env(variant),
     )
     return process, _ProtocolReader(process)
 
@@ -297,29 +301,23 @@ def _shutdown(process: subprocess.Popen[str]) -> None:
             process.kill()
 
 
-def smoke() -> None:
-    doctor()
-    process, reader = _start_worker()
+def smoke(variant: str = "q8") -> None:
+    doctor(variant)
+    process, reader = _start_worker(variant)
     try:
         ready = reader.get(timeout=180)
         if ready.get("type") != "ready":
             raise SystemExit(f"Worker failed to start: {ready}")
 
         print(
-            f"Ready: Paul / Q8 GGUF in {float(ready['load_seconds']):.2f}s. "
-            "Measuring streamed synthesis..."
+            f"Ready: Paul / {variant.upper()} GGUF in "
+            f"{float(ready['load_seconds']):.2f}s. Measuring streamed synthesis..."
         )
 
         request_id = 1
-        text = (
-            "Right, I've found the problem. "
-            "It was using the old configuration file."
-        )
+        text = "Right, I've found the problem. It was using the old configuration file."
         started = time.perf_counter()
-        _send(
-            process,
-            {"cmd": "synthesize", "id": request_id, "text": text},
-        )
+        _send(process, {"cmd": "synthesize", "id": request_id, "text": text})
 
         first_audio: float | None = None
         audio_bytes = 0
@@ -349,8 +347,11 @@ def smoke() -> None:
                     f"({chunks} chunk(s), RTF {rtf:.3f})"
                 )
                 if first_audio is None or chunks < 2:
-                    raise SystemExit(
-                        "Streaming check failed: expected multiple audio chunks."
+                    raise SystemExit("Streaming check failed: expected multiple audio chunks.")
+                if rtf >= 1.0:
+                    print(
+                        "WARNING: RTF is >= 1.0; continuous live playback may starve "
+                        "without additional buffering or a faster variant."
                     )
                 break
             elif kind in {"error", "fatal"}:
@@ -386,7 +387,7 @@ def smoke() -> None:
             elif kind in {"error", "fatal"}:
                 raise SystemExit(f"Worker error: {message.get('message')}")
 
-        print("NeuTTS-2E production smoke test: OK")
+        print(f"NeuTTS-2E {variant.upper()} smoke test: OK")
     finally:
         _shutdown(process)
 
@@ -399,16 +400,22 @@ def main() -> int:
         "command",
         choices=("doctor", "migrate-auth", "auth", "smoke"),
     )
+    parser.add_argument(
+        "--variant",
+        choices=tuple(MODEL_VARIANTS),
+        default="q8",
+        help="NeuTTS-2E GGUF quantization to validate or smoke-test.",
+    )
     args = parser.parse_args()
 
     if args.command == "doctor":
-        doctor()
+        doctor(args.variant)
     elif args.command == "migrate-auth":
         migrate_auth()
     elif args.command == "auth":
         auth()
     elif args.command == "smoke":
-        smoke()
+        smoke(args.variant)
     return 0
 
 
