@@ -12,13 +12,21 @@ The exploratory conversational-TTS benchmark is concluded.
 
 The user preferred Paul after listening to the generated Chatterbox Nano and NeuTTS-2E samples.
 
-## Production shape
+## Production findings
 
-Production intentionally uses the same **PyTorch NeuTTS-2E backbone** used in the listening test, paired with the **int8 ONNX NeuCodec decoder**. This keeps the selected voice path compiler-free on Windows and avoids introducing `llama-cpp-python` purely for within-utterance streaming.
+The listening benchmark originally used the PyTorch NeuTTS-2E backbone. A production smoke test later measured approximately **9.0 seconds to first audio** for **3.7 seconds of generated speech**, an RTF of roughly **2.43**. That is too slow for interactive Dexter speech, even with sentence-level pipelining.
 
-Dexter's existing `VoiceOutput` already buffers streamed LLM text into sentence-sized units, synthesizes sentence N+1 while sentence N is playing, and owns playback interruption. That sentence-level pipeline is the initial production strategy. NeuTTS's GGUF-only chunk streaming can be revisited later only if measured sentence latency justifies the added native runtime complexity.
+NeuTTS's implementation only exposes `infer_stream()` for its quantized llama.cpp path. Production therefore uses the official **Q8 GGUF NeuTTS-2E backbone** with the **int8 ONNX NeuCodec decoder**, keeping Paul/neutral while enabling chunked CPU output.
 
-The heavy TTS dependency stack is intentionally isolated from Dexter Host in a persistent Python 3.13 worker under the machine-local Dexter voice runtime. The host-side `SpeechBackend` adapter exchanges float32 PCM with that worker while the existing `VoiceOutput` core owns sentence buffering, playback, and interruption.
+An earlier attempt pinned `llama-cpp-python==0.3.20`. That exact pin failed to resolve a suitable prebuilt Windows CPU wheel and pip fell back to a local CMake/NMake build. The production project now resolves llama.cpp from its official CPU-wheel index and explicitly forbids source-building `llama-cpp-python`, so a missing wheel fails immediately rather than introducing compiler tooling.
+
+## Runtime architecture
+
+NeuTTS 1.4.1 officially requires Python `>=3.10,<3.14`. The rest of Dexter's current Host/STT dependencies support Python 3.13, so Dexter is standardized on **Python 3.13 as a project**, rather than running a Python 3.14 Host plus a separate Python 3.13 TTS environment.
+
+The repository root `pyproject.toml` and `.python-version` define one uv-managed Host/STT/TTS environment. TTS remains a Host-owned child process for lifecycle, cancellation, and native-runtime isolation, but it launches with the same `sys.executable` as the Host. Model/auth/cache data remains machine-local outside the repository.
+
+The separate `dexter-tools` environment remains an independent MCP service boundary with its own dependency surface; it is not a workaround for TTS or Python-version incompatibility.
 
 ## Retired benchmark
 
