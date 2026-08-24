@@ -10,6 +10,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 
+from Runtime.Voice.buffered_audio_sink import BufferedSoundDeviceAudioSink
 from Runtime.Voice.neutts2e_backend import NeuTTS2EBackend
 from Runtime.Voice.tts import VoiceOutput, VoiceOutputState
 
@@ -21,7 +22,10 @@ class SpeechOutputService:
     """Own one VoiceOutput instance without exposing model lifecycle to Qt."""
 
     def __init__(self, output: VoiceOutput | None = None) -> None:
-        self.output = output or VoiceOutput(NeuTTS2EBackend())
+        self.output = output or VoiceOutput(
+            NeuTTS2EBackend(),
+            sink=BufferedSoundDeviceAudioSink(),
+        )
         self._lock = threading.Lock()
         self._ready = False
         self._response_active = False
