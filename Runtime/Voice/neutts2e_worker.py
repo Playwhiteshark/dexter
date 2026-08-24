@@ -105,6 +105,7 @@ def _command_reader(
 
 def main() -> int:
     import numpy as np
+    import llama_cpp
     import neutts.neutts as neutts_core
     from neutts import NeuTTS2E
 
@@ -114,6 +115,19 @@ def main() -> int:
         # unusual 16-core/16-thread Core Ultra 7 255H without forking NeuTTS.
         # It is opt-in and never changes the production default implicitly.
         neutts_core._n_perf_cores = lambda: THREAD_OVERRIDE
+
+    try:
+        gpu_offload_supported = bool(llama_cpp.llama_supports_gpu_offload())
+    except Exception:
+        gpu_offload_supported = False
+    try:
+        raw_system_info = llama_cpp.llama_print_system_info()
+        if isinstance(raw_system_info, bytes):
+            llama_system_info = raw_system_info.decode("utf-8", errors="replace")
+        else:
+            llama_system_info = str(raw_system_info)
+    except Exception as exc:
+        llama_system_info = f"unavailable: {type(exc).__name__}: {exc}"
 
     commands: queue.Queue[dict[str, Any] | None] = queue.Queue()
     cancelled: set[int] = set()
@@ -156,6 +170,17 @@ def main() -> int:
         _emit({"type": "fatal", "message": str(exc)})
         return 1
 
+    requested_gpu_layers: int | None = None
+    actual_threads: int | None = None
+    try:
+        requested_gpu_layers = int(tts.backbone.model_params.n_gpu_layers)
+    except Exception:
+        pass
+    try:
+        actual_threads = int(tts.backbone.n_threads)
+    except Exception:
+        pass
+
     decode_profile = {"seconds": 0.0, "calls": 0}
     if PROFILE_STAGES:
         # Diagnostic-only instrumentation. Do not put timing calls on every
@@ -186,6 +211,10 @@ def main() -> int:
             "backbone_device": BACKBONE_DEVICE,
             "vulkan_device": VULKAN_DEVICE or None,
             "threads": THREAD_OVERRIDE,
+            "actual_threads": actual_threads,
+            "gpu_offload_supported": gpu_offload_supported,
+            "requested_gpu_layers": requested_gpu_layers,
+            "llama_system_info": llama_system_info,
         }
     )
 
@@ -261,8 +290,8 @@ def main() -> int:
                     "first_audio_seconds": first_audio_seconds,
                     "generation_seconds": time.perf_counter() - started,
                     "chunks": chunk_count,
-                    "decode_seconds": decode_profile["seconds"],
-                    "decode_calls": decode_profile["calls"],
+                    "decode_seconds": decode_profile["seconds"] if PROFILE_STAGES else None,
+                    "decode_calls": decode_profile["calls"] if PROFILE_STAGES else None,
                 }
             )
         finally:
