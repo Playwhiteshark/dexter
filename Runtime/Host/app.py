@@ -1,12 +1,13 @@
-"""Dexter local host: PTT/STT + overlay + persistent Goose ACP session.
+"""Dexter local host: PTT/STT + TTS + overlay + persistent Goose ACP session.
 
 Runtime:
 - VoiceInput owns Ctrl+/ and Moonshine.
+- SpeechOutputService owns interruptible Paul/NeuTTS output.
 - Qt owns presentation/tray.
 - GooseACP owns one ``goose acp`` child process + persistent session.
 - Finalized speech is sent to Goose.
-- Agent text streams into the response card while bounded ACP activity records
-  remain expandable beneath that same response.
+- Agent text streams into both the response card and sentence-buffered speech.
+- Bounded ACP activity records remain expandable beneath each response.
 - Dexter's own permission policy auto-approves classified computer actions and
   keeps exceptional file approvals inside the Host UI.
 """
@@ -34,6 +35,7 @@ from Runtime.Host.goose_acp import (
     PermissionRequest,
 )
 from Runtime.Host.overlay import ApprovalOption, DexterOverlay
+from Runtime.Voice.output_service import SpeechOutputService
 from Runtime.Voice.stt import PromptResult, VoiceInput, VoiceState
 
 ICON_PATH = Path(__file__).resolve().parent / "assets" / "dexter.ico"
@@ -70,6 +72,8 @@ class RuntimeQtBridge(QObject):
 
     gateway_state = Signal(object)
     gateway_error = Signal(str)
+    tts_ready = Signal(object)
+    tts_error = Signal(str)
 
 
 class DexterHost:
@@ -98,6 +102,7 @@ class DexterHost:
             on_error=self.runtime_bridge.gateway_error.emit,
             on_log=lambda line: print(f"[GATEWAY] {line}"),
         )
+        self.speech = SpeechOutputService()
 
         self.goose_bridge = GooseQtBridge()
         self.goose = GooseACP(
@@ -194,6 +199,8 @@ class DexterHost:
     def _connect_runtime(self) -> None:
         self.runtime_bridge.gateway_state.connect(self._on_gateway_state)
         self.runtime_bridge.gateway_error.connect(self._on_gateway_error)
+        self.runtime_bridge.tts_ready.connect(self._on_tts_ready)
+        self.runtime_bridge.tts_error.connect(self._on_tts_error)
 
     def _configure_ctrl_c(self) -> None:
         signal.signal(signal.SIGINT, lambda _sig, _frame: self.request_quit())
@@ -223,6 +230,14 @@ class DexterHost:
             daemon=True,
         )
         self._voice_startup_thread.start()
+
+        # Paul is intentionally warmed in parallel. A failed or slow TTS model
+        # must never block text/voice input or the Goose session from becoming
+        # usable; replies are simply text-only until this reports ready.
+        self.speech.start_async(
+            on_ready=self.runtime_bridge.tts_ready.emit,
+            on_error=self.runtime_bridge.tts_error.emit,
+        )
 
     def _start_runtime_worker(self) -> None:
         try:
@@ -288,6 +303,10 @@ class DexterHost:
         self._submit_to_agent(prompt)
 
     def _submit_to_agent(self, prompt: str) -> None:
+        # A fresh user turn always wins over old spoken output. PTT normally
+        # interrupts earlier at key-down; this also covers typed prompts.
+        self.speech.interrupt()
+
         if not self.goose.submit_prompt(prompt):
             self._agent_turn_pending = False
             self.overlay.set_agent_busy(False)
@@ -319,6 +338,7 @@ class DexterHost:
 
     @Slot()
     def _cancel_agent_turn(self) -> None:
+        self.speech.interrupt()
         if not self._agent_turn_pending:
             return
 
@@ -352,6 +372,9 @@ class DexterHost:
             ):
                 self.overlay.set_status("Idle")
         elif state is VoiceState.LISTENING:
+            # PTT is a hard barge-in boundary: stop audible/queued TTS before
+            # showing the listening state or accepting the new utterance.
+            self.speech.interrupt()
             self.summon_overlay()
             self.overlay.set_stt_partial("")
             self.overlay.set_status("Listening…")
@@ -382,11 +405,13 @@ class DexterHost:
             self._refresh_interaction_admission()
             self.overlay.set_status("Thinking…")
         elif state is GooseState.ERROR:
+            self.speech.interrupt()
             self.overlay.set_agent_busy(False)
             self._refresh_interaction_admission()
             self.show_overlay()
             self.overlay.set_status("Agent error")
         elif state is GooseState.STOPPED and not self._quitting:
+            self.speech.interrupt()
             self.overlay.set_agent_busy(False)
             self._refresh_interaction_admission()
             self.overlay.set_status("Agent stopped")
@@ -396,6 +421,7 @@ class DexterHost:
         if self._agent_turn_pending:
             return
 
+        self.speech.interrupt()
         if self.goose.new_chat():
             self.overlay.set_status("Clearing chat…")
             self._refresh_interaction_admission()
@@ -404,6 +430,7 @@ class DexterHost:
 
     @Slot()
     def _on_chat_cleared(self) -> None:
+        self.speech.interrupt()
         self._agent_turn_pending = False
         self.overlay.clear_history()
         self.overlay.set_agent_busy(False)
@@ -418,12 +445,14 @@ class DexterHost:
         self._refresh_interaction_admission()
         self.summon_overlay()
         self.overlay.begin_assistant_response()
+        self.speech.begin_response()
         self.overlay.set_status("Thinking…")
 
     @Slot(str)
     def _on_response_text(self, text: str) -> None:
         self.summon_overlay()
         self.overlay.append_assistant_text(text)
+        self.speech.add_text(text)
 
     @Slot(object)
     def _on_activity(self, update) -> None:
@@ -436,6 +465,12 @@ class DexterHost:
         self.overlay.clear_approval()
         self.overlay.finish_assistant_response()
         self.overlay.set_agent_busy(False)
+        if stop_reason == "end_turn":
+            self.speech.finish_response()
+        else:
+            # Never flush a partial sentence after cancellation/failure.
+            self.speech.interrupt()
+
         # Goose transitions to IDLE immediately after this callback; until that
         # state arrives, admission intentionally remains closed.
         self._refresh_interaction_admission()
@@ -459,17 +494,20 @@ class DexterHost:
             if self.goose.state is GooseState.STOPPED:
                 self.overlay.set_status("Starting agent…")
         elif state is GatewayState.ERROR:
+            self.speech.interrupt()
             self.overlay.set_agent_busy(False)
             self._refresh_interaction_admission()
             self.show_overlay()
             self.overlay.set_status("Gateway error")
         elif state is GatewayState.STOPPED and not self._quitting:
+            self.speech.interrupt()
             self.overlay.set_agent_busy(False)
             self._refresh_interaction_admission()
             self.overlay.set_status("Gateway stopped")
 
     @Slot(str)
     def _on_gateway_error(self, message: str) -> None:
+        self.speech.interrupt()
         self._agent_turn_pending = False
         self.overlay.set_agent_busy(False)
         self._refresh_interaction_admission()
@@ -485,6 +523,23 @@ class DexterHost:
             name="DexterGooseStopAfterGatewayFailure",
             daemon=True,
         ).start()
+
+    @Slot(object)
+    def _on_tts_ready(self, info) -> None:
+        if isinstance(info, dict):
+            load = info.get("load_seconds")
+            speaker = info.get("speaker", "paul")
+            model = info.get("model", "NeuTTS-2E")
+            if isinstance(load, (int, float)):
+                print(f"[TTS] Ready: {speaker} / {model} ({load:.2f}s warmup)")
+                return
+        print("[TTS] Ready: Paul / NeuTTS-2E")
+
+    @Slot(str)
+    def _on_tts_error(self, message: str) -> None:
+        # TTS is optional at the Host boundary. Keep Dexter usable as text-only
+        # and make the failure visible in the console for diagnosis.
+        print(f"[TTS ERROR] {message}", file=sys.stderr)
 
     @Slot(object)
     def _on_permission_request(self, request: PermissionRequest) -> None:
@@ -530,6 +585,7 @@ class DexterHost:
 
     @Slot(str)
     def _on_goose_error(self, message: str) -> None:
+        self.speech.interrupt()
         self._agent_turn_pending = False
         self.overlay.clear_approval()
         self.overlay.set_agent_busy(False)
@@ -545,6 +601,7 @@ class DexterHost:
             return
 
         self._quitting = True
+        self.speech.interrupt()
         self.overlay.clear_approval()
         self.overlay.set_agent_busy(False)
         self._refresh_interaction_admission()
@@ -560,6 +617,10 @@ class DexterHost:
 
     def _stop_runtime_worker(self) -> None:
         try:
+            # Stop output first so no speech survives Host shutdown. This also
+            # terminates the model child if warmup is still in progress.
+            self.speech.stop()
+
             voice_startup = self._voice_startup_thread
             if (
                 voice_startup is not None
