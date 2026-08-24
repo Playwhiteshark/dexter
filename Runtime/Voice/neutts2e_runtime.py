@@ -18,7 +18,10 @@ import subprocess
 import sys
 import threading
 import time
+import wave
 from pathlib import Path
+
+import numpy as np
 
 ROOT = Path(__file__).resolve().parent
 REPO_ROOT = ROOT.parents[1]
@@ -58,6 +61,7 @@ CODEC_ACCESS = (
     "model.onnx",
     "https://huggingface.co/neuphonic/neucodec-onnx-decoder-int8",
 )
+SAMPLE_RATE = 24_000
 
 
 def runtime_env(variant: str | None = None) -> dict[str, str]:
@@ -301,6 +305,61 @@ def _shutdown(process: subprocess.Popen[str]) -> None:
             process.kill()
 
 
+def _read_stream_request(
+    process: subprocess.Popen[str],
+    reader: _ProtocolReader,
+    *,
+    request_id: int,
+    text: str,
+    timeout: float = 120,
+    print_chunks: bool = False,
+) -> tuple[list[np.ndarray], float | None, float, list[dict[str, float]]]:
+    started = time.perf_counter()
+    last_arrival = started
+    first_audio: float | None = None
+    chunks: list[np.ndarray] = []
+    timings: list[dict[str, float]] = []
+
+    _send(process, {"cmd": "synthesize", "id": request_id, "text": text})
+
+    while True:
+        message = reader.get(timeout=timeout)
+        if message.get("id") not in (None, request_id):
+            raise SystemExit(f"Protocol desync: {message}")
+        kind = message.get("type")
+        if kind == "audio":
+            now = time.perf_counter()
+            arrival_delta = now - last_arrival
+            if first_audio is None:
+                first_audio = now - started
+            raw = base64.b64decode(str(message["pcm_f32le"]))
+            samples = np.frombuffer(raw, dtype="<f4").copy()
+            duration = samples.size / SAMPLE_RATE
+            chunk_number = len(chunks) + 1
+            timings.append(
+                {
+                    "chunk": float(chunk_number),
+                    "arrival_delta_seconds": arrival_delta,
+                    "audio_seconds": duration,
+                    "arrival_minus_audio_seconds": arrival_delta - duration,
+                }
+            )
+            chunks.append(samples)
+            if print_chunks:
+                label = "TTFA" if chunk_number == 1 else "gap"
+                print(
+                    f"Chunk {chunk_number:2d}: {label}={arrival_delta:6.3f}s  "
+                    f"audio={duration:6.3f}s  "
+                    f"arrival-audio={arrival_delta - duration:+6.3f}s"
+                )
+            last_arrival = now
+        elif kind == "done":
+            total = time.perf_counter() - started
+            return chunks, first_audio, total, timings
+        elif kind in {"error", "fatal"}:
+            raise SystemExit(f"Worker error: {message.get('message')}")
+
+
 def smoke(variant: str = "q8") -> None:
     doctor(variant)
     process, reader = _start_worker(variant)
@@ -314,48 +373,32 @@ def smoke(variant: str = "q8") -> None:
             f"{float(ready['load_seconds']):.2f}s. Measuring streamed synthesis..."
         )
 
-        request_id = 1
         text = "Right, I've found the problem. It was using the old configuration file."
-        started = time.perf_counter()
-        _send(process, {"cmd": "synthesize", "id": request_id, "text": text})
-
-        first_audio: float | None = None
-        audio_bytes = 0
-        chunks = 0
-
-        while True:
-            message = reader.get(timeout=90)
-            if message.get("id") not in (None, request_id):
-                raise SystemExit(f"Protocol desync: {message}")
-            kind = message.get("type")
-            if kind == "audio":
-                if first_audio is None:
-                    first_audio = time.perf_counter() - started
-                chunks += 1
-                audio_bytes += len(base64.b64decode(str(message["pcm_f32le"])))
-            elif kind == "done":
-                total = time.perf_counter() - started
-                audio_seconds = audio_bytes / 4 / 24_000
-                rtf = total / audio_seconds if audio_seconds else float("inf")
-                print(
-                    f"First audio: {first_audio:.3f}s"
-                    if first_audio is not None
-                    else "First audio: none"
-                )
-                print(
-                    f"Generated:   {audio_seconds:.3f}s audio in {total:.3f}s "
-                    f"({chunks} chunk(s), RTF {rtf:.3f})"
-                )
-                if first_audio is None or chunks < 2:
-                    raise SystemExit("Streaming check failed: expected multiple audio chunks.")
-                if rtf >= 1.0:
-                    print(
-                        "WARNING: RTF is >= 1.0; continuous live playback may starve "
-                        "without additional buffering or a faster variant."
-                    )
-                break
-            elif kind in {"error", "fatal"}:
-                raise SystemExit(f"Worker error: {message.get('message')}")
+        chunks, first_audio, total, _ = _read_stream_request(
+            process,
+            reader,
+            request_id=1,
+            text=text,
+        )
+        audio_samples = sum(chunk.size for chunk in chunks)
+        audio_seconds = audio_samples / SAMPLE_RATE
+        rtf = total / audio_seconds if audio_seconds else float("inf")
+        print(
+            f"First audio: {first_audio:.3f}s"
+            if first_audio is not None
+            else "First audio: none"
+        )
+        print(
+            f"Generated:   {audio_seconds:.3f}s audio in {total:.3f}s "
+            f"({len(chunks)} chunk(s), RTF {rtf:.3f})"
+        )
+        if first_audio is None or len(chunks) < 2:
+            raise SystemExit("Streaming check failed: expected multiple audio chunks.")
+        if rtf >= 1.0:
+            print(
+                "WARNING: RTF is >= 1.0; continuous live playback may starve "
+                "without additional buffering or a faster backend."
+            )
 
         request_id = 2
         _send(
@@ -392,19 +435,103 @@ def smoke(variant: str = "q8") -> None:
         _shutdown(process)
 
 
+def capture(variant: str = "q8") -> None:
+    """Capture streamed PCM without real-time playback to isolate audio defects."""
+    doctor(variant)
+    process, reader = _start_worker(variant)
+    diagnostics = RUNTIME_ROOT / "diagnostics"
+    diagnostics.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    wav_path = diagnostics / f"paul-{variant}-stream-{stamp}.wav"
+    json_path = diagnostics / f"paul-{variant}-stream-{stamp}.json"
+
+    text = (
+        "Right, I've found the problem. It was using the old configuration file. "
+        "The important question now is whether these pauses are present in the "
+        "generated waveform itself, or only appear while Dexter plays the stream "
+        "in real time. This diagnostic records the exact streamed audio without "
+        "playing it, so we can separate synthesis artifacts from playback starvation."
+    )
+
+    try:
+        ready = reader.get(timeout=180)
+        if ready.get("type") != "ready":
+            raise SystemExit(f"Worker failed to start: {ready}")
+        print(
+            f"Ready: Paul / {variant.upper()} GGUF in "
+            f"{float(ready['load_seconds']):.2f}s. Capturing raw stream..."
+        )
+
+        chunks, first_audio, total, timings = _read_stream_request(
+            process,
+            reader,
+            request_id=1,
+            text=text,
+            timeout=180,
+            print_chunks=True,
+        )
+        if not chunks:
+            raise SystemExit("Capture produced no audio.")
+
+        combined = np.concatenate(chunks).astype(np.float32, copy=False)
+        clipped = np.clip(combined, -1.0, 1.0)
+        pcm16 = (clipped * 32767.0).astype("<i2")
+        with wave.open(str(wav_path), "wb") as output:
+            output.setnchannels(1)
+            output.setsampwidth(2)
+            output.setframerate(SAMPLE_RATE)
+            output.writeframes(pcm16.tobytes())
+
+        audio_seconds = combined.size / SAMPLE_RATE
+        rtf = total / audio_seconds if audio_seconds else float("inf")
+        result = {
+            "variant": variant,
+            "speaker": "paul",
+            "sample_rate": SAMPLE_RATE,
+            "text": text,
+            "load_seconds": float(ready["load_seconds"]),
+            "first_audio_seconds": first_audio,
+            "generation_seconds": total,
+            "audio_seconds": audio_seconds,
+            "rtf": rtf,
+            "chunks": len(chunks),
+            "chunk_timings": timings,
+            "wav": str(wav_path),
+        }
+        json_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+
+        worst = max(
+            (item["arrival_minus_audio_seconds"] for item in timings[1:]),
+            default=0.0,
+        )
+        print("")
+        print(f"Captured: {audio_seconds:.3f}s audio in {total:.3f}s (RTF {rtf:.3f})")
+        print(f"Worst post-first-chunk arrival deficit: {worst:+.3f}s")
+        print(f"WAV:    {wav_path}")
+        print(f"Timing: {json_path}")
+        print("")
+        print(
+            "Listen to the WAV. If it is choppy too, the defect is already in "
+            "NeuTTS streaming/codec output. If the WAV is smooth, Dexter's live "
+            "playback path is introducing the choppiness."
+        )
+    finally:
+        _shutdown(process)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Validate Dexter's NeuTTS-2E / Paul runtime."
     )
     parser.add_argument(
         "command",
-        choices=("doctor", "migrate-auth", "auth", "smoke"),
+        choices=("doctor", "migrate-auth", "auth", "smoke", "capture"),
     )
     parser.add_argument(
         "--variant",
         choices=tuple(MODEL_VARIANTS),
         default="q8",
-        help="NeuTTS-2E GGUF quantization to validate or smoke-test.",
+        help="NeuTTS-2E GGUF quantization to validate or test.",
     )
     args = parser.parse_args()
 
@@ -416,6 +543,8 @@ def main() -> int:
         auth()
     elif args.command == "smoke":
         smoke(args.variant)
+    elif args.command == "capture":
+        capture(args.variant)
     return 0
 
 
