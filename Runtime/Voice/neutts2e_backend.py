@@ -61,12 +61,15 @@ class NeuTTS2EBackend:
             }
         )
 
-        # Validated accelerator path on the target machine:
-        # Q8 backbone -> Intel Arc 140T Vulkan0, ONNX codec -> CPU.
+        # Validated production path on the target machine:
+        # Q8 backbone -> Intel Arc 140T Vulkan0; ONNX codec + Perth -> CPU.
+        # GGUF generation and CPU post-processing are pipelined so Perth remains
+        # enabled without forcing the two independent devices to run serially.
         # Preserve explicit developer overrides when troubleshooting.
         env.setdefault("DEXTER_TTS_VARIANT", "q8")
         env.setdefault("DEXTER_TTS_BACKBONE_DEVICE", "gpu")
         env.setdefault("DEXTER_TTS_VULKAN_DEVICE", "0")
+        env.setdefault("DEXTER_TTS_PIPELINE_WATERMARK", "1")
         env.setdefault("GGML_VK_VISIBLE_DEVICES", env["DEXTER_TTS_VULKAN_DEVICE"])
         return env
 
