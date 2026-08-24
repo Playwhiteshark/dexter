@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import base64
 import contextlib
-import ctypes
 import json
 import os
 import queue
@@ -47,9 +46,13 @@ if BACKBONE_DEVICE not in {"cpu", "gpu"}:
 VULKAN_DEVICE = os.environ.get("DEXTER_TTS_VULKAN_DEVICE", "").strip()
 if VULKAN_DEVICE:
     # llama.cpp reads this before backend initialization. Keeping selection in
-    # the worker environment prevents a Vulkan build from silently choosing the
-    # RTX that Ollama already owns.
+    # the worker environment prevents TTS from silently choosing the RTX that
+    # Ollama already owns.
     os.environ["GGML_VK_VISIBLE_DEVICES"] = VULKAN_DEVICE
+
+PIPELINE_WATERMARK = (
+    os.environ.get("DEXTER_TTS_PIPELINE_WATERMARK", "0").strip() == "1"
+)
 
 THREAD_OVERRIDE_RAW = os.environ.get("DEXTER_TTS_THREADS", "").strip()
 THREAD_OVERRIDE: int | None = None
@@ -72,74 +75,6 @@ _PROTOCOL_OUT = sys.stdout
 def _emit(payload: dict[str, Any]) -> None:
     _PROTOCOL_OUT.write(json.dumps(payload, separators=(",", ":")) + "\n")
     _PROTOCOL_OUT.flush()
-
-
-def _decode_c_string(value: bytes | None) -> str:
-    if not value:
-        return ""
-    return value.decode("utf-8", errors="replace")
-
-
-def _enumerate_backend_devices() -> tuple[list[dict[str, Any]], str | None]:
-    """Best-effort ggml device enumeration for newer llama.cpp bindings."""
-    try:
-        from llama_cpp import llama_cpp as llama_low
-
-        lib = llama_low._lib
-        dev_count = lib.ggml_backend_dev_count
-        dev_count.argtypes = []
-        dev_count.restype = ctypes.c_size_t
-
-        dev_get = lib.ggml_backend_dev_get
-        dev_get.argtypes = [ctypes.c_size_t]
-        dev_get.restype = ctypes.c_void_p
-
-        dev_name = lib.ggml_backend_dev_name
-        dev_name.argtypes = [ctypes.c_void_p]
-        dev_name.restype = ctypes.c_char_p
-
-        dev_description = lib.ggml_backend_dev_description
-        dev_description.argtypes = [ctypes.c_void_p]
-        dev_description.restype = ctypes.c_char_p
-
-        dev_type = lib.ggml_backend_dev_type
-        dev_type.argtypes = [ctypes.c_void_p]
-        dev_type.restype = ctypes.c_int
-
-        dev_backend_reg = lib.ggml_backend_dev_backend_reg
-        dev_backend_reg.argtypes = [ctypes.c_void_p]
-        dev_backend_reg.restype = ctypes.c_void_p
-
-        reg_name = lib.ggml_backend_reg_name
-        reg_name.argtypes = [ctypes.c_void_p]
-        reg_name.restype = ctypes.c_char_p
-
-        type_names = {
-            0: "cpu",
-            1: "gpu",
-            2: "igpu",
-            3: "accelerator",
-            4: "meta",
-        }
-        devices: list[dict[str, Any]] = []
-        for index in range(int(dev_count())):
-            device = dev_get(index)
-            if not device:
-                continue
-            backend = dev_backend_reg(device)
-            raw_type = int(dev_type(device))
-            devices.append(
-                {
-                    "index": index,
-                    "name": _decode_c_string(dev_name(device)),
-                    "description": _decode_c_string(dev_description(device)),
-                    "type": type_names.get(raw_type, f"unknown-{raw_type}"),
-                    "backend": _decode_c_string(reg_name(backend)) if backend else "",
-                }
-            )
-        return devices, None
-    except Exception as exc:
-        return [], f"{type(exc).__name__}: {exc}"
 
 
 def _command_reader(
@@ -179,25 +114,24 @@ def main() -> int:
     import numpy as np
     import llama_cpp
     import neutts.neutts as neutts_core
+
+    if PIPELINE_WATERMARK:
+        from Runtime.Voice.neutts2e_pipelined_stream import install
+
+        install()
+
     from neutts import NeuTTS2E
 
     if THREAD_OVERRIDE is not None:
         # NeuTTS 1.4.1 defaults Windows/Linux generation to half os.cpu_count().
-        # This opt-in override exists only for controlled diagnostics.
+        # This override remains diagnostic-only; the measured production default
+        # of eight generation threads is faster than forcing all 16 CPU cores.
         neutts_core._n_perf_cores = lambda: THREAD_OVERRIDE
 
     try:
         gpu_offload_supported = bool(llama_cpp.llama_supports_gpu_offload())
     except Exception:
         gpu_offload_supported = False
-    try:
-        raw_system_info = llama_cpp.llama_print_system_info()
-        if isinstance(raw_system_info, bytes):
-            llama_system_info = raw_system_info.decode("utf-8", errors="replace")
-        else:
-            llama_system_info = str(raw_system_info)
-    except Exception as exc:
-        llama_system_info = f"unavailable: {type(exc).__name__}: {exc}"
 
     commands: queue.Queue[dict[str, Any] | None] = queue.Queue()
     cancelled: set[int] = set()
@@ -215,6 +149,8 @@ def main() -> int:
     device_detail = BACKBONE_DEVICE
     if BACKBONE_DEVICE == "gpu" and VULKAN_DEVICE:
         device_detail += f" (Vulkan visible device {VULKAN_DEVICE})"
+    if PIPELINE_WATERMARK:
+        device_detail += ", pipelined Perth"
     if THREAD_OVERRIDE is not None:
         device_detail += f", threads={THREAD_OVERRIDE}"
 
@@ -251,8 +187,6 @@ def main() -> int:
     except Exception:
         pass
 
-    backend_devices, backend_device_error = _enumerate_backend_devices()
-
     decode_profile = {"seconds": 0.0, "calls": 0}
     llama_profile = {
         "eval_seconds": 0.0,
@@ -279,10 +213,6 @@ def main() -> int:
         tts._decode = profiled_decode
 
     if PROFILE_LLAMA_STAGES:
-        # llama-cpp-python's high-level streaming completion calls these instance
-        # methods in its hot loop. Timing them lets us distinguish native model
-        # eval from sampling and Python token/string handling without changing
-        # the generated token sequence.
         for method_name in ("eval", "sample", "tokenize", "detokenize"):
             original = getattr(tts.backbone, method_name)
             seconds_key = f"{method_name}_seconds"
@@ -318,13 +248,10 @@ def main() -> int:
             "load_seconds": load_seconds,
             "backbone_device": BACKBONE_DEVICE,
             "vulkan_device": VULKAN_DEVICE or None,
-            "threads": THREAD_OVERRIDE,
+            "pipeline_watermark": PIPELINE_WATERMARK,
             "actual_threads": actual_threads,
             "gpu_offload_supported": gpu_offload_supported,
             "requested_gpu_layers": requested_gpu_layers,
-            "llama_system_info": llama_system_info,
-            "backend_devices": backend_devices,
-            "backend_device_error": backend_device_error,
         }
     )
 
