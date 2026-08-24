@@ -1,14 +1,19 @@
-"""Diagnostic-only NeuTTS worker that makes llama.cpp model loading verbose.
+"""Diagnostic-only NeuTTS worker with verbose llama.cpp model loading.
 
 NeuTTS 1.4.1 hardcodes ``verbose=False`` when it constructs its GGUF
-``llama_cpp.Llama`` backbone. That is sensible in production, but it hides the
-only version-compatible proof that Vulkan really selected a device and
-actually offloaded model layers. This wrapper forces ``verbose=True`` only for
-accelerator diagnostics, then delegates to the unchanged production worker.
+``llama_cpp.Llama`` backbone. Accelerator diagnostics need the native model-load
+log to prove device selection and layer offload, so this wrapper forces
+``verbose=True`` before delegating to the unchanged production worker.
+
+For controlled A/B measurements, ``DEXTER_TTS_DISABLE_WATERMARK=1`` also
+prevents NeuTTS from loading Perth at all. Production does not set that flag;
+this exists only to measure the watermarking stage without keeping its neural
+model resident in memory.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -28,6 +33,11 @@ def _verbose_llama_init(self, *args, **kwargs):
 
 
 llama_cpp.Llama.__init__ = _verbose_llama_init
+
+if os.environ.get("DEXTER_TTS_DISABLE_WATERMARK", "0").strip() == "1":
+    import neutts.neutts as neutts_core
+
+    neutts_core._load_watermarker = lambda: None
 
 from Runtime.Voice import neutts2e_worker
 
