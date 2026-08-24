@@ -1,12 +1,16 @@
-"""Compare NeuTTS-2E Q8 backbone execution paths.
+"""Compare NeuTTS-2E Q8 execution paths and optional watermark overhead.
 
 This benchmark keeps the voice, Q8 model, text, ONNX NeuCodec decoder, and
-worker protocol fixed. Only the GGUF backbone execution changes.
+worker protocol fixed. GPU cases use a diagnostic-only worker that forces
+llama.cpp verbosity, then verify the native model-load log itself. A result is
+accepted as GPU-backed only when llama.cpp names the expected accelerator and
+reports model layers actually offloaded to GPU.
 
-GPU cases use a diagnostic-only worker that forces llama.cpp verbosity, then
-verify the native model-load log itself. A result is accepted as GPU-backed
-only when llama.cpp names the expected accelerator and reports model layers
-actually offloaded to GPU.
+The ``arc-no-watermark`` case additionally prevents the optional Perth neural
+audio watermarker from loading at all. That isolates the cost of watermarking
+without changing the speech backbone, codec, voice, seed, or generated tokens.
+Production remains unchanged unless a later measured decision explicitly adopts
+that mode.
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ class Case:
     vulkan_device: str | None = None
     expected_device_text: str | None = None
     forbidden_device_text: str | None = None
+    disable_watermark: bool = False
 
 
 TEXT = (
@@ -54,11 +59,20 @@ CASES = (
     Case("cpu16", "CPU: 16 generation threads", "cpu", threads=16),
     Case(
         "arc",
-        "Intel Arc candidate: Vulkan device 0",
+        "Intel Arc: Vulkan device 0 + Perth watermark",
         "gpu",
         vulkan_device="0",
         expected_device_text="arc",
         forbidden_device_text="5050",
+    ),
+    Case(
+        "arc-no-watermark",
+        "Intel Arc: Vulkan device 0, Perth not loaded",
+        "gpu",
+        vulkan_device="0",
+        expected_device_text="arc",
+        forbidden_device_text="5050",
+        disable_watermark=True,
     ),
     Case(
         "rtx",
@@ -110,6 +124,11 @@ def _start(case: Case):
     else:
         env.pop("DEXTER_TTS_VULKAN_DEVICE", None)
         env.pop("GGML_VK_VISIBLE_DEVICES", None)
+
+    if case.disable_watermark:
+        env["DEXTER_TTS_DISABLE_WATERMARK"] = "1"
+    else:
+        env.pop("DEXTER_TTS_DISABLE_WATERMARK", None)
 
     worker = VERBOSE_WORKER if case.device == "gpu" else runtime.WORKER
     process = subprocess.Popen(
@@ -204,7 +223,7 @@ def _verify_gpu_ready(
         print(f"  {line}")
 
 
-def _run(case: Case) -> dict[str, float | str | int | None]:
+def _run(case: Case) -> dict[str, float | str | int | None | bool]:
     print("")
     print("=" * 72)
     print(case.label)
@@ -224,6 +243,7 @@ def _run(case: Case) -> dict[str, float | str | int | None]:
             f"backbone={ready.get('backbone_device')}; "
             f"vulkan_device={ready.get('vulkan_device')}; "
             f"threads={ready.get('actual_threads')}; "
+            f"watermark={'off' if case.disable_watermark else 'on'}; "
             f"gpu_offload_supported={ready.get('gpu_offload_supported')}; "
             f"requested_gpu_layers={ready.get('requested_gpu_layers')}"
         )
@@ -255,6 +275,7 @@ def _run(case: Case) -> dict[str, float | str | int | None]:
         return {
             "key": case.key,
             "label": case.label,
+            "disable_watermark": case.disable_watermark,
             "load_seconds": float(ready["load_seconds"]),
             "first_audio_seconds": first_audio,
             "audio_seconds": audio_seconds,
@@ -273,9 +294,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--case",
-        choices=("all", "cpu-default", "cpu16", "arc", "rtx"),
+        choices=("all", "cpu-default", "cpu16", "arc", "arc-no-watermark", "rtx"),
         default="all",
-        help="Run only one execution path. RTX is opt-in unless selected explicitly.",
+        help=(
+            "Run one execution path. arc-no-watermark prevents Perth from loading. "
+            "RTX remains opt-in."
+        ),
     )
     args = parser.parse_args()
 
@@ -287,7 +311,9 @@ def main() -> int:
     )
 
     if args.case == "all":
-        selected = tuple(case for case in CASES if case.key != "rtx")
+        selected = tuple(
+            case for case in CASES if case.key not in {"rtx", "arc-no-watermark"}
+        )
     else:
         selected = tuple(case for case in CASES if case.key == args.case)
 
@@ -310,7 +336,7 @@ def main() -> int:
     if float(best["rtf"]) >= 1.0:
         print(
             "No selected path is real-time yet. Do not solve that with a larger "
-            "permanent playback buffer; compare the next acceleration backend."
+            "permanent playback buffer; compare the next measured optimization."
         )
     return 0
 
