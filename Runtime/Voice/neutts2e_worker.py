@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import ctypes
 import json
 import os
 import queue
@@ -68,6 +69,79 @@ _PROTOCOL_OUT = sys.stdout
 def _emit(payload: dict[str, Any]) -> None:
     _PROTOCOL_OUT.write(json.dumps(payload, separators=(",", ":")) + "\n")
     _PROTOCOL_OUT.flush()
+
+
+def _decode_c_string(value: bytes | None) -> str:
+    if not value:
+        return ""
+    return value.decode("utf-8", errors="replace")
+
+
+def _enumerate_backend_devices() -> tuple[list[dict[str, Any]], str | None]:
+    """Enumerate ggml devices through the C API used by this exact llama build.
+
+    llama_print_system_info() is not a reliable backend/device inventory. The
+    ggml backend registry is authoritative and lets diagnostics verify that a
+    requested Vulkan-visible device really is the Intel Arc rather than the RTX.
+    """
+    try:
+        from llama_cpp import llama_cpp as llama_low
+
+        lib = llama_low._lib
+        dev_count = lib.ggml_backend_dev_count
+        dev_count.argtypes = []
+        dev_count.restype = ctypes.c_size_t
+
+        dev_get = lib.ggml_backend_dev_get
+        dev_get.argtypes = [ctypes.c_size_t]
+        dev_get.restype = ctypes.c_void_p
+
+        dev_name = lib.ggml_backend_dev_name
+        dev_name.argtypes = [ctypes.c_void_p]
+        dev_name.restype = ctypes.c_char_p
+
+        dev_description = lib.ggml_backend_dev_description
+        dev_description.argtypes = [ctypes.c_void_p]
+        dev_description.restype = ctypes.c_char_p
+
+        dev_type = lib.ggml_backend_dev_type
+        dev_type.argtypes = [ctypes.c_void_p]
+        dev_type.restype = ctypes.c_int
+
+        dev_backend_reg = lib.ggml_backend_dev_backend_reg
+        dev_backend_reg.argtypes = [ctypes.c_void_p]
+        dev_backend_reg.restype = ctypes.c_void_p
+
+        reg_name = lib.ggml_backend_reg_name
+        reg_name.argtypes = [ctypes.c_void_p]
+        reg_name.restype = ctypes.c_char_p
+
+        type_names = {
+            0: "cpu",
+            1: "gpu",
+            2: "igpu",
+            3: "accelerator",
+            4: "meta",
+        }
+        devices: list[dict[str, Any]] = []
+        for index in range(int(dev_count())):
+            device = dev_get(index)
+            if not device:
+                continue
+            backend = dev_backend_reg(device)
+            raw_type = int(dev_type(device))
+            devices.append(
+                {
+                    "index": index,
+                    "name": _decode_c_string(dev_name(device)),
+                    "description": _decode_c_string(dev_description(device)),
+                    "type": type_names.get(raw_type, f"unknown-{raw_type}"),
+                    "backend": _decode_c_string(reg_name(backend)) if backend else "",
+                }
+            )
+        return devices, None
+    except Exception as exc:
+        return [], f"{type(exc).__name__}: {exc}"
 
 
 def _command_reader(
@@ -181,6 +255,8 @@ def main() -> int:
     except Exception:
         pass
 
+    backend_devices, backend_device_error = _enumerate_backend_devices()
+
     decode_profile = {"seconds": 0.0, "calls": 0}
     if PROFILE_STAGES:
         # Diagnostic-only instrumentation. Do not put timing calls on every
@@ -215,6 +291,8 @@ def main() -> int:
             "gpu_offload_supported": gpu_offload_supported,
             "requested_gpu_layers": requested_gpu_layers,
             "llama_system_info": llama_system_info,
+            "backend_devices": backend_devices,
+            "backend_device_error": backend_device_error,
         }
     )
 
@@ -273,9 +351,7 @@ def main() -> int:
                             "type": "audio",
                             "id": request_id,
                             "sample_rate": SAMPLE_RATE,
-                            "pcm_f32le": base64.b64encode(
-                                samples.tobytes()
-                            ).decode("ascii"),
+                            "pcm_f32le": base64.b64encode(samples.tobytes()).decode("ascii"),
                         }
                     )
         except Exception as exc:
