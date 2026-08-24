@@ -1,3 +1,0 @@
-agent-client-protocol==0.12.1
-moonshine-voice==0.1.2
-PySide6-Essentials==6.11.1
