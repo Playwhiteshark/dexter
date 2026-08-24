@@ -17,6 +17,16 @@ from __future__ import annotations
 import subprocess
 import sys
 from dataclasses import dataclass
+from pathlib import Path
+
+# When invoked as `python Diagnostics\\benchmark_tts_acceleration.py`, Python
+# puts Diagnostics/ rather than the repository root on sys.path. Add the repo
+# root explicitly before importing Dexter modules so this diagnostic works from
+# the documented command regardless of the caller's PYTHONPATH.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+repo_root_text = str(REPO_ROOT)
+if repo_root_text not in sys.path:
+    sys.path.insert(0, repo_root_text)
 
 from Runtime.Voice import neutts2e_runtime as runtime
 
