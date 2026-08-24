@@ -1,15 +1,13 @@
 """Continuous jitter-buffered local playback for Dexter TTS.
 
-NeuTTS can produce valid streamed PCM more slowly and less regularly than the
-sound device consumes it. Writing each model chunk directly to a blocking
-PortAudio stream makes those scheduling gaps audible. This sink decouples
-model-chunk arrival from the device callback with a small bounded PCM buffer.
+NeuTTS produces valid streamed PCM in discrete chunks. This sink decouples
+model-chunk arrival from PortAudio's realtime callback with a small bounded PCM
+buffer so ordinary scheduling jitter does not become audible.
 
-The buffer is deliberately measured in audio seconds, not model chunks: chunk
-sizes are an implementation detail of the TTS backend. On underflow the sink
-outputs silence and waits for a useful reserve before resuming, avoiding rapid
-pause/unpause chatter. PTT interruption still aborts the PortAudio stream and
-clears all queued PCM immediately.
+The selected Arc + pipelined-Perth production path now synthesizes faster than
+real time, so the buffer is a jitter reserve rather than compensation for a
+permanent producer deficit. PTT interruption still aborts the PortAudio stream
+and clears all queued PCM immediately.
 """
 
 from __future__ import annotations
@@ -37,10 +35,10 @@ class BufferedSoundDeviceAudioSink:
         self,
         *,
         device: int | str | None = None,
-        prebuffer_seconds: float = 1.0,
-        rebuffer_seconds: float = 0.75,
+        prebuffer_seconds: float = 0.5,
+        rebuffer_seconds: float = 0.5,
         max_buffer_seconds: float = 5.0,
-        startup_max_wait_seconds: float = 1.0,
+        startup_max_wait_seconds: float = 0.75,
         stream_factory: StreamFactory | None = None,
     ) -> None:
         if prebuffer_seconds <= 0:
@@ -91,7 +89,6 @@ class BufferedSoundDeviceAudioSink:
         if sample_rate <= 0:
             raise ValueError("Audio sample rate must be positive")
 
-        # Own the PCM independently of the backend's temporary buffers.
         samples = np.ascontiguousarray(samples, dtype=np.float32).copy()
         stream_to_start = None
 
@@ -120,7 +117,6 @@ class BufferedSoundDeviceAudioSink:
                 and not cancel_event.is_set()
                 and self._buffered_frames >= max_frames
             ):
-                # Backpressure only the playback worker, never Qt or Goose.
                 self._condition.wait(timeout=0.05)
 
             if self._closed or cancel_event.is_set():
@@ -220,8 +216,6 @@ class BufferedSoundDeviceAudioSink:
         if self._buffered_frames <= 0:
             return None
 
-        # Mark the start as claimed before releasing the lock so a second model
-        # chunk/deadline thread cannot call PortAudio start() twice.
         self._stream_started = True
         self._rebuffering = False
         return self._stream
@@ -253,11 +247,9 @@ class BufferedSoundDeviceAudioSink:
         _time_info: Any,
         status: Any,
     ) -> None:
-        # PortAudio requires every output frame to be initialized.
         outdata.fill(0)
         if status:
-            # Avoid logging from PortAudio's realtime thread. Any starvation is
-            # already represented by the rebuffering state below.
+            # Avoid logging from PortAudio's realtime thread.
             pass
 
         with self._condition:
@@ -286,10 +278,6 @@ class BufferedSoundDeviceAudioSink:
                     self._chunks.popleft()
                     self._head_offset = 0
 
-            # If PortAudio asked for more data than was available, the remainder
-            # is already silence. Do not resume on the very next tiny model
-            # chunk: accumulate a useful reserve first, which turns rapid
-            # pause/unpause chatter into at most one deliberate refill pause.
             if written < frames:
                 self._rebuffering = True
 
