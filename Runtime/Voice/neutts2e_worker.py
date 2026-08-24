@@ -36,6 +36,32 @@ SPEAKER = "paul"
 EMOTION = "neutral"
 SAMPLE_RATE = 24_000
 
+BACKBONE_DEVICE = os.environ.get("DEXTER_TTS_BACKBONE_DEVICE", "cpu").strip().lower()
+if BACKBONE_DEVICE not in {"cpu", "gpu"}:
+    raise SystemExit(
+        "DEXTER_TTS_BACKBONE_DEVICE must be 'cpu' or 'gpu', "
+        f"got {BACKBONE_DEVICE!r}"
+    )
+
+VULKAN_DEVICE = os.environ.get("DEXTER_TTS_VULKAN_DEVICE", "").strip()
+if VULKAN_DEVICE:
+    # llama.cpp reads this before backend initialization. Keeping selection in
+    # the worker environment prevents a Vulkan build from silently choosing the
+    # RTX that Ollama already owns.
+    os.environ["GGML_VK_VISIBLE_DEVICES"] = VULKAN_DEVICE
+
+THREAD_OVERRIDE_RAW = os.environ.get("DEXTER_TTS_THREADS", "").strip()
+THREAD_OVERRIDE: int | None = None
+if THREAD_OVERRIDE_RAW:
+    try:
+        THREAD_OVERRIDE = int(THREAD_OVERRIDE_RAW)
+    except ValueError as exc:
+        raise SystemExit("DEXTER_TTS_THREADS must be an integer") from exc
+    if THREAD_OVERRIDE < 1:
+        raise SystemExit("DEXTER_TTS_THREADS must be positive")
+
+PROFILE_STAGES = os.environ.get("DEXTER_TTS_PROFILE_STAGES", "0").strip() == "1"
+
 _PROTOCOL_OUT = sys.stdout
 
 
@@ -79,7 +105,15 @@ def _command_reader(
 
 def main() -> int:
     import numpy as np
+    import neutts.neutts as neutts_core
     from neutts import NeuTTS2E
+
+    if THREAD_OVERRIDE is not None:
+        # NeuTTS 1.4.1 uses a private helper that defaults non-macOS systems to
+        # half of os.cpu_count(). This diagnostic override lets us measure the
+        # unusual 16-core/16-thread Core Ultra 7 255H without forking NeuTTS.
+        # It is opt-in and never changes the production default implicitly.
+        neutts_core._n_perf_cores = lambda: THREAD_OVERRIDE
 
     commands: queue.Queue[dict[str, Any] | None] = queue.Queue()
     cancelled: set[int] = set()
@@ -94,16 +128,22 @@ def main() -> int:
     )
     reader.start()
 
+    device_detail = BACKBONE_DEVICE
+    if BACKBONE_DEVICE == "gpu" and VULKAN_DEVICE:
+        device_detail += f" (Vulkan visible device {VULKAN_DEVICE})"
+    if THREAD_OVERRIDE is not None:
+        device_detail += f", threads={THREAD_OVERRIDE}"
+
     try:
         print(
-            f"[TTS] Loading {MODEL_REPO} / {CODEC_REPO} on CPU...",
+            f"[TTS] Loading {MODEL_REPO} / {CODEC_REPO}; backbone={device_detail}, codec=cpu...",
             file=sys.stderr,
         )
         started = time.perf_counter()
         with contextlib.redirect_stdout(sys.stderr):
             tts = NeuTTS2E(
                 backbone_repo=MODEL_REPO,
-                backbone_device="cpu",
+                backbone_device=BACKBONE_DEVICE,
                 codec_repo=CODEC_REPO,
                 codec_device="cpu",
                 seed=42,
@@ -116,21 +156,21 @@ def main() -> int:
         _emit({"type": "fatal", "message": str(exc)})
         return 1
 
-    # Profile the ONNX/audio reconstruction side independently from token
-    # generation. This is intentionally wrapped after warmup so diagnostics
-    # describe steady-state synthesis rather than model initialization.
     decode_profile = {"seconds": 0.0, "calls": 0}
-    original_decode = tts._decode
+    if PROFILE_STAGES:
+        # Diagnostic-only instrumentation. Do not put timing calls on every
+        # production codec decode once the bottleneck has already been measured.
+        original_decode = tts._decode
 
-    def profiled_decode(*args: Any, **kwargs: Any):
-        decode_started = time.perf_counter()
-        try:
-            return original_decode(*args, **kwargs)
-        finally:
-            decode_profile["seconds"] += time.perf_counter() - decode_started
-            decode_profile["calls"] += 1
+        def profiled_decode(*args: Any, **kwargs: Any):
+            decode_started = time.perf_counter()
+            try:
+                return original_decode(*args, **kwargs)
+            finally:
+                decode_profile["seconds"] += time.perf_counter() - decode_started
+                decode_profile["calls"] += 1
 
-    tts._decode = profiled_decode
+        tts._decode = profiled_decode
 
     _emit(
         {
@@ -143,6 +183,9 @@ def main() -> int:
             "codec": CODEC_REPO,
             "mode": "stream",
             "load_seconds": load_seconds,
+            "backbone_device": BACKBONE_DEVICE,
+            "vulkan_device": VULKAN_DEVICE or None,
+            "threads": THREAD_OVERRIDE,
         }
     )
 
