@@ -62,6 +62,9 @@ if THREAD_OVERRIDE_RAW:
         raise SystemExit("DEXTER_TTS_THREADS must be positive")
 
 PROFILE_STAGES = os.environ.get("DEXTER_TTS_PROFILE_STAGES", "0").strip() == "1"
+PROFILE_LLAMA_STAGES = (
+    os.environ.get("DEXTER_TTS_PROFILE_LLAMA_STAGES", "0").strip() == "1"
+)
 
 _PROTOCOL_OUT = sys.stdout
 
@@ -78,12 +81,7 @@ def _decode_c_string(value: bytes | None) -> str:
 
 
 def _enumerate_backend_devices() -> tuple[list[dict[str, Any]], str | None]:
-    """Enumerate ggml devices through the C API used by this exact llama build.
-
-    llama_print_system_info() is not a reliable backend/device inventory. The
-    ggml backend registry is authoritative and lets diagnostics verify that a
-    requested Vulkan-visible device really is the Intel Arc rather than the RTX.
-    """
+    """Best-effort ggml device enumeration for newer llama.cpp bindings."""
     try:
         from llama_cpp import llama_cpp as llama_low
 
@@ -184,10 +182,8 @@ def main() -> int:
     from neutts import NeuTTS2E
 
     if THREAD_OVERRIDE is not None:
-        # NeuTTS 1.4.1 uses a private helper that defaults non-macOS systems to
-        # half of os.cpu_count(). This diagnostic override lets us measure the
-        # unusual 16-core/16-thread Core Ultra 7 255H without forking NeuTTS.
-        # It is opt-in and never changes the production default implicitly.
+        # NeuTTS 1.4.1 defaults Windows/Linux generation to half os.cpu_count().
+        # This opt-in override exists only for controlled diagnostics.
         neutts_core._n_perf_cores = lambda: THREAD_OVERRIDE
 
     try:
@@ -258,9 +254,18 @@ def main() -> int:
     backend_devices, backend_device_error = _enumerate_backend_devices()
 
     decode_profile = {"seconds": 0.0, "calls": 0}
+    llama_profile = {
+        "eval_seconds": 0.0,
+        "eval_calls": 0,
+        "sample_seconds": 0.0,
+        "sample_calls": 0,
+        "tokenize_seconds": 0.0,
+        "tokenize_calls": 0,
+        "detokenize_seconds": 0.0,
+        "detokenize_calls": 0,
+    }
+
     if PROFILE_STAGES:
-        # Diagnostic-only instrumentation. Do not put timing calls on every
-        # production codec decode once the bottleneck has already been measured.
         original_decode = tts._decode
 
         def profiled_decode(*args: Any, **kwargs: Any):
@@ -272,6 +277,33 @@ def main() -> int:
                 decode_profile["calls"] += 1
 
         tts._decode = profiled_decode
+
+    if PROFILE_LLAMA_STAGES:
+        # llama-cpp-python's high-level streaming completion calls these instance
+        # methods in its hot loop. Timing them lets us distinguish native model
+        # eval from sampling and Python token/string handling without changing
+        # the generated token sequence.
+        for method_name in ("eval", "sample", "tokenize", "detokenize"):
+            original = getattr(tts.backbone, method_name)
+            seconds_key = f"{method_name}_seconds"
+            calls_key = f"{method_name}_calls"
+
+            def make_profiled(method, seconds_name: str, calls_name: str):
+                def profiled(*args: Any, **kwargs: Any):
+                    call_started = time.perf_counter()
+                    try:
+                        return method(*args, **kwargs)
+                    finally:
+                        llama_profile[seconds_name] += time.perf_counter() - call_started
+                        llama_profile[calls_name] += 1
+
+                return profiled
+
+            setattr(
+                tts.backbone,
+                method_name,
+                make_profiled(original, seconds_key, calls_key),
+            )
 
     _emit(
         {
@@ -320,6 +352,9 @@ def main() -> int:
 
         decode_profile["seconds"] = 0.0
         decode_profile["calls"] = 0
+        for key in llama_profile:
+            llama_profile[key] = 0.0 if key.endswith("_seconds") else 0
+
         started = time.perf_counter()
         first_audio_seconds: float | None = None
         chunk_count = 0
@@ -358,18 +393,19 @@ def main() -> int:
             traceback.print_exc(file=sys.stderr)
             _emit({"type": "error", "id": request_id, "message": str(exc)})
         else:
-            _emit(
-                {
-                    "type": "done",
-                    "id": request_id,
-                    "cancelled": cancelled_during_run,
-                    "first_audio_seconds": first_audio_seconds,
-                    "generation_seconds": time.perf_counter() - started,
-                    "chunks": chunk_count,
-                    "decode_seconds": decode_profile["seconds"] if PROFILE_STAGES else None,
-                    "decode_calls": decode_profile["calls"] if PROFILE_STAGES else None,
-                }
-            )
+            payload: dict[str, Any] = {
+                "type": "done",
+                "id": request_id,
+                "cancelled": cancelled_during_run,
+                "first_audio_seconds": first_audio_seconds,
+                "generation_seconds": time.perf_counter() - started,
+                "chunks": chunk_count,
+                "decode_seconds": decode_profile["seconds"] if PROFILE_STAGES else None,
+                "decode_calls": decode_profile["calls"] if PROFILE_STAGES else None,
+            }
+            if PROFILE_LLAMA_STAGES:
+                payload.update(llama_profile)
+            _emit(payload)
         finally:
             with cancel_lock:
                 cancelled.discard(request_id)
