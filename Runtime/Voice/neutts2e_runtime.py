@@ -41,6 +41,19 @@ EXPECTED_PACKAGES = (
     "torchaudio",
 )
 
+MODEL_ACCESS_FILES = (
+    (
+        "neuphonic/neutts-2e-q8-gguf",
+        "neutts-2e-Q8_0.gguf",
+        "https://huggingface.co/neuphonic/neutts-2e-q8-gguf",
+    ),
+    (
+        "neuphonic/neucodec-onnx-decoder-int8",
+        "model.onnx",
+        "https://huggingface.co/neuphonic/neucodec-onnx-decoder-int8",
+    ),
+)
+
 
 def runtime_env() -> dict[str, str]:
     cache = RUNTIME_ROOT / "cache"
@@ -68,6 +81,65 @@ def runtime_env() -> dict[str, str]:
 
 def _project_python_ok() -> bool:
     return sys.version_info[:2] == (3, 13)
+
+
+def _hf_token_path() -> Path:
+    return RUNTIME_ROOT / "cache" / "huggingface" / "token"
+
+
+def _check_model_access(failures: list[str]) -> None:
+    """Verify gated model access without downloading model payloads."""
+    token_path = _hf_token_path()
+    if not token_path.exists():
+        failures.append(
+            "Hugging Face login is missing. Run `uv run python "
+            "Runtime\\Voice\\neutts2e_runtime.py auth`."
+        )
+        return
+
+    token = token_path.read_text(encoding="utf-8").strip()
+    if not token:
+        failures.append("Hugging Face token file is empty.")
+        return
+
+    try:
+        from huggingface_hub import hf_hub_download
+        from huggingface_hub.errors import GatedRepoError, HfHubHTTPError
+    except Exception as exc:
+        failures.append(f"Could not import Hugging Face access checker: {exc}")
+        return
+
+    cache_dir = RUNTIME_ROOT / "cache" / "huggingface" / "hub"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    for repo_id, filename, access_url in MODEL_ACCESS_FILES:
+        try:
+            info = hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+                token=token,
+                cache_dir=cache_dir,
+                dry_run=True,
+            )
+        except GatedRepoError:
+            failures.append(
+                f"No Hugging Face file access for {repo_id}. "
+                f"Accept the model terms at {access_url}"
+            )
+        except HfHubHTTPError as exc:
+            failures.append(
+                f"Hugging Face access check failed for {repo_id}: "
+                f"HTTP {getattr(exc.response, 'status_code', '?')}"
+            )
+        except Exception as exc:
+            failures.append(
+                f"Hugging Face access check failed for {repo_id}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        else:
+            size = getattr(info, "file_size", None)
+            suffix = f" ({size / (1024 * 1024):.1f} MB)" if size else ""
+            print(f"HF model access:         OK  {repo_id}{suffix}")
 
 
 def doctor() -> None:
@@ -103,9 +175,12 @@ def doctor() -> None:
         except Exception as exc:
             failures.append(f"Native/runtime import check failed: {exc}")
 
-    token = RUNTIME_ROOT / "cache" / "huggingface" / "token"
+    token = _hf_token_path()
     print(f"HF auth: {'present' if token.exists() else 'missing'}")
     print(f"Voice data: {RUNTIME_ROOT}")
+
+    if not failures:
+        _check_model_access(failures)
 
     if failures:
         for failure in failures:
