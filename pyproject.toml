@@ -1,0 +1,41 @@
+[project]
+name = "dexter-local"
+version = "0.3.0"
+description = "Local Windows assistant runtime"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "agent-client-protocol==0.12.1",
+  "moonshine-voice==0.1.2",
+  "PySide6-Essentials==6.11.1",
+  "numpy>=2.2.6,<3",
+  "sounddevice>=0.5,<1",
+  "neutts==1.4.1",
+  "onnxruntime==1.29.0",
+  "llama-cpp-python>=0.3.21,<0.4",
+  "gguf",
+]
+
+[tool.uv]
+package = false
+environments = [
+  "sys_platform == 'win32' and platform_machine == 'AMD64'",
+]
+required-environments = [
+  "sys_platform == 'win32' and platform_machine == 'AMD64'",
+]
+constraint-dependencies = [
+  "torch==2.11.0",
+  "torchaudio==2.11.0",
+  "torchao==0.17.0",
+  "torchtune==0.6.1",
+  "datasets==4.1.1",
+]
+no-build-package = ["llama-cpp-python"]
+
+[tool.uv.sources]
+llama-cpp-python = { index = "llama-cpp-cpu" }
+
+[[tool.uv.index]]
+name = "llama-cpp-cpu"
+url = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
+explicit = true
