@@ -3,12 +3,11 @@
 NeuTTS 1.4.1 hardcodes ``verbose=False`` when it constructs its GGUF
 ``llama_cpp.Llama`` backbone. Accelerator diagnostics need the native model-load
 log to prove device selection and layer offload, so this wrapper forces
-``verbose=True`` before delegating to the unchanged production worker.
+``verbose=True`` before delegating to the production worker.
 
-For controlled A/B measurements, ``DEXTER_TTS_DISABLE_WATERMARK=1`` also
-prevents NeuTTS from loading Perth at all. Production does not set that flag;
-this exists only to measure the watermarking stage without keeping its neural
-model resident in memory.
+``DEXTER_TTS_PIPELINE_WATERMARK=1`` additionally installs the diagnostic
+Arc-generation / CPU-watermark pipeline. Perth remains loaded and applied to
+all streamed audio; only scheduling changes.
 """
 
 from __future__ import annotations
@@ -34,10 +33,10 @@ def _verbose_llama_init(self, *args, **kwargs):
 
 llama_cpp.Llama.__init__ = _verbose_llama_init
 
-if os.environ.get("DEXTER_TTS_DISABLE_WATERMARK", "0").strip() == "1":
-    import neutts.neutts as neutts_core
+if os.environ.get("DEXTER_TTS_PIPELINE_WATERMARK", "0").strip() == "1":
+    from Diagnostics.neutts2e_pipelined_stream import install
 
-    neutts_core._load_watermarker = lambda: None
+    install()
 
 from Runtime.Voice import neutts2e_worker
 
