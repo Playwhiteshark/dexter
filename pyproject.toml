@@ -33,9 +33,9 @@ constraint-dependencies = [
 no-build-package = ["llama-cpp-python"]
 
 [tool.uv.sources]
-llama-cpp-python = { index = "llama-cpp-cpu" }
+llama-cpp-python = { index = "llama-cpp-vulkan" }
 
 [[tool.uv.index]]
-name = "llama-cpp-cpu"
-url = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
+name = "llama-cpp-vulkan"
+url = "https://abetlen.github.io/llama-cpp-python/whl/vulkan"
 explicit = true
