@@ -1,16 +1,14 @@
-"""Compare NeuTTS-2E Q8 execution paths and optional watermark overhead.
+"""Compare NeuTTS-2E Q8 execution paths.
 
-This benchmark keeps the voice, Q8 model, text, ONNX NeuCodec decoder, and
-worker protocol fixed. GPU cases use a diagnostic-only worker that forces
-llama.cpp verbosity, then verify the native model-load log itself. A result is
-accepted as GPU-backed only when llama.cpp names the expected accelerator and
-reports model layers actually offloaded to GPU.
+This benchmark keeps the voice, Q8 model, text, ONNX NeuCodec decoder, Perth
+watermarking, and worker protocol fixed. GPU cases use a diagnostic-only worker
+that forces llama.cpp verbosity, then verify the native model-load log itself.
+A result is accepted as GPU-backed only when llama.cpp names the expected
+accelerator and reports model layers actually offloaded to GPU.
 
-The ``arc-no-watermark`` case additionally prevents the optional Perth neural
-audio watermarker from loading at all. That isolates the cost of watermarking
-without changing the speech backbone, codec, voice, seed, or generated tokens.
-Production remains unchanged unless a later measured decision explicitly adopts
-that mode.
+The ``arc-pipelined`` case changes only scheduling: Arc token generation runs in
+a producer thread while the main thread performs the same ONNX decode, Perth
+watermarking, crop, and overlap-add operations in order.
 """
 
 from __future__ import annotations
@@ -43,15 +41,14 @@ class Case:
     vulkan_device: str | None = None
     expected_device_text: str | None = None
     forbidden_device_text: str | None = None
-    disable_watermark: bool = False
+    pipeline_watermark: bool = False
 
 
 TEXT = (
     "Right, I've found the problem. It was using the old configuration file. "
-    "This benchmark keeps the speech model, speaker, codec, and text identical "
-    "while changing only where the language model backbone performs its work. "
-    "The result will tell us whether Dexter should use more CPU cores or move "
-    "Paul's backbone onto an available graphics processor."
+    "This benchmark keeps the speech model, speaker, codec, watermark, and text "
+    "identical while changing only where work runs or whether independent stages "
+    "are scheduled concurrently."
 )
 
 CASES = (
@@ -59,20 +56,20 @@ CASES = (
     Case("cpu16", "CPU: 16 generation threads", "cpu", threads=16),
     Case(
         "arc",
-        "Intel Arc: Vulkan device 0 + Perth watermark",
+        "Intel Arc: Vulkan device 0 + serial Perth",
         "gpu",
         vulkan_device="0",
         expected_device_text="arc",
         forbidden_device_text="5050",
     ),
     Case(
-        "arc-no-watermark",
-        "Intel Arc: Vulkan device 0, Perth not loaded",
+        "arc-pipelined",
+        "Intel Arc: Vulkan device 0 + pipelined Perth",
         "gpu",
         vulkan_device="0",
         expected_device_text="arc",
         forbidden_device_text="5050",
-        disable_watermark=True,
+        pipeline_watermark=True,
     ),
     Case(
         "rtx",
@@ -125,10 +122,10 @@ def _start(case: Case):
         env.pop("DEXTER_TTS_VULKAN_DEVICE", None)
         env.pop("GGML_VK_VISIBLE_DEVICES", None)
 
-    if case.disable_watermark:
-        env["DEXTER_TTS_DISABLE_WATERMARK"] = "1"
+    if case.pipeline_watermark:
+        env["DEXTER_TTS_PIPELINE_WATERMARK"] = "1"
     else:
-        env.pop("DEXTER_TTS_DISABLE_WATERMARK", None)
+        env.pop("DEXTER_TTS_PIPELINE_WATERMARK", None)
 
     worker = VERBOSE_WORKER if case.device == "gpu" else runtime.WORKER
     process = subprocess.Popen(
@@ -243,7 +240,7 @@ def _run(case: Case) -> dict[str, float | str | int | None | bool]:
             f"backbone={ready.get('backbone_device')}; "
             f"vulkan_device={ready.get('vulkan_device')}; "
             f"threads={ready.get('actual_threads')}; "
-            f"watermark={'off' if case.disable_watermark else 'on'}; "
+            f"Perth=on; pipeline={'on' if case.pipeline_watermark else 'off'}; "
             f"gpu_offload_supported={ready.get('gpu_offload_supported')}; "
             f"requested_gpu_layers={ready.get('requested_gpu_layers')}"
         )
@@ -275,7 +272,7 @@ def _run(case: Case) -> dict[str, float | str | int | None | bool]:
         return {
             "key": case.key,
             "label": case.label,
-            "disable_watermark": case.disable_watermark,
+            "pipeline_watermark": case.pipeline_watermark,
             "load_seconds": float(ready["load_seconds"]),
             "first_audio_seconds": first_audio,
             "audio_seconds": audio_seconds,
@@ -294,12 +291,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--case",
-        choices=("all", "cpu-default", "cpu16", "arc", "arc-no-watermark", "rtx"),
+        choices=("all", "cpu-default", "cpu16", "arc", "arc-pipelined", "rtx"),
         default="all",
-        help=(
-            "Run one execution path. arc-no-watermark prevents Perth from loading. "
-            "RTX remains opt-in."
-        ),
+        help="Run one execution path. RTX remains opt-in.",
     )
     args = parser.parse_args()
 
@@ -307,13 +301,11 @@ def main() -> int:
     print("")
     print(
         "GPU timings are accepted only after native llama.cpp load logs prove the "
-        "expected device and actual layer offload."
+        "expected device and actual layer offload. Perth remains enabled."
     )
 
     if args.case == "all":
-        selected = tuple(
-            case for case in CASES if case.key not in {"rtx", "arc-no-watermark"}
-        )
+        selected = tuple(case for case in CASES if case.key != "rtx")
     else:
         selected = tuple(case for case in CASES if case.key == args.case)
 
