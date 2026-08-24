@@ -116,6 +116,22 @@ def main() -> int:
         _emit({"type": "fatal", "message": str(exc)})
         return 1
 
+    # Profile the ONNX/audio reconstruction side independently from token
+    # generation. This is intentionally wrapped after warmup so diagnostics
+    # describe steady-state synthesis rather than model initialization.
+    decode_profile = {"seconds": 0.0, "calls": 0}
+    original_decode = tts._decode
+
+    def profiled_decode(*args: Any, **kwargs: Any):
+        decode_started = time.perf_counter()
+        try:
+            return original_decode(*args, **kwargs)
+        finally:
+            decode_profile["seconds"] += time.perf_counter() - decode_started
+            decode_profile["calls"] += 1
+
+    tts._decode = profiled_decode
+
     _emit(
         {
             "type": "ready",
@@ -152,6 +168,8 @@ def main() -> int:
                 _emit({"type": "done", "id": request_id, "cancelled": True})
                 continue
 
+        decode_profile["seconds"] = 0.0
+        decode_profile["calls"] = 0
         started = time.perf_counter()
         first_audio_seconds: float | None = None
         chunk_count = 0
@@ -200,6 +218,8 @@ def main() -> int:
                     "first_audio_seconds": first_audio_seconds,
                     "generation_seconds": time.perf_counter() - started,
                     "chunks": chunk_count,
+                    "decode_seconds": decode_profile["seconds"],
+                    "decode_calls": decode_profile["calls"],
                 }
             )
         finally:
