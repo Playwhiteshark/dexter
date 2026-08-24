@@ -1,9 +1,13 @@
 """Persistent Python 3.13 NeuTTS-2E worker for Dexter.
 
-The Dexter host deliberately does not import NeuTTS.  This worker owns the heavy
+The Dexter host deliberately does not import NeuTTS. This worker owns the heavy
 ML runtime in a separate process and speaks a tiny JSON-lines protocol over
-stdin/stdout.  Model/library logging is redirected to stderr so stdout remains a
+stdin/stdout. Model/library logging is redirected to stderr so stdout remains a
 clean protocol channel.
+
+The worker intentionally uses the PyTorch NeuTTS-2E backbone selected in the
+listening test. Dexter's VoiceOutput already pipelines sentence-sized synthesis
+with playback, so production does not require llama-cpp-python or a compiler.
 """
 
 from __future__ import annotations
@@ -18,7 +22,7 @@ import time
 import traceback
 from typing import Any
 
-MODEL_REPO = "neuphonic/neutts-2e-q8-gguf"
+MODEL_REPO = "neuphonic/neutts-2e"
 CODEC_REPO = "neuphonic/neucodec-onnx-decoder-int8"
 SPEAKER = "paul"
 EMOTION = "neutral"
@@ -67,7 +71,7 @@ def _command_reader(
 
 def main() -> int:
     # Imports stay in the worker so the normal Dexter host environment remains
-    # independent of NeuTTS, PyTorch, llama.cpp, and ONNX Runtime.
+    # independent of NeuTTS, PyTorch, Transformers, and ONNX Runtime.
     import numpy as np
     from neutts import NeuTTS2E
 
@@ -98,16 +102,15 @@ def main() -> int:
                 codec_device="cpu",
                 seed=42,
             )
-            # Pay first-inference setup cost for the selected voice during
-            # Dexter startup, not on the first spoken answer.
-            for _ in tts.infer_stream(
+            # Warm the exact selected speaker during Dexter startup so the first
+            # answer does not pay model/reference setup costs.
+            tts.infer(
                 "Warming up.",
                 speaker=SPEAKER,
                 emotion=EMOTION,
                 temperature=1.0,
                 top_k=50,
-            ):
-                pass
+            )
         load_seconds = time.perf_counter() - started
     except Exception as exc:
         traceback.print_exc(file=sys.stderr)
@@ -122,6 +125,7 @@ def main() -> int:
             "sample_rate": SAMPLE_RATE,
             "model": MODEL_REPO,
             "codec": CODEC_REPO,
+            "mode": "sentence",
             "load_seconds": load_seconds,
         }
     )
@@ -146,56 +150,59 @@ def main() -> int:
             was_cancelled = request_id in cancelled
         if was_cancelled:
             _emit({"type": "done", "id": request_id, "cancelled": True})
+            with cancel_lock:
+                cancelled.discard(request_id)
             continue
 
         started = time.perf_counter()
-        first_audio_seconds: float | None = None
-        chunk_count = 0
-        cancelled_during_run = False
-
         try:
             with contextlib.redirect_stdout(sys.stderr):
-                stream = tts.infer_stream(
+                wav = tts.infer(
                     text,
                     speaker=SPEAKER,
                     emotion=EMOTION,
                     temperature=1.0,
                     top_k=50,
                 )
-                for wav in stream:
-                    with cancel_lock:
-                        if request_id in cancelled:
-                            cancelled_during_run = True
-                            break
 
-                    samples = np.asarray(wav, dtype=np.float32).reshape(-1)
-                    if samples.size == 0:
-                        continue
-                    if first_audio_seconds is None:
-                        first_audio_seconds = time.perf_counter() - started
-                    chunk_count += 1
-                    _emit(
-                        {
-                            "type": "audio",
-                            "id": request_id,
-                            "sample_rate": SAMPLE_RATE,
-                            "pcm_f32le": base64.b64encode(samples.tobytes()).decode("ascii"),
-                        }
-                    )
-        except Exception as exc:
-            traceback.print_exc(file=sys.stderr)
-            _emit({"type": "error", "id": request_id, "message": str(exc)})
-        else:
+            with cancel_lock:
+                cancelled_after_generation = request_id in cancelled
+            if cancelled_after_generation:
+                _emit(
+                    {
+                        "type": "done",
+                        "id": request_id,
+                        "cancelled": True,
+                        "generation_seconds": time.perf_counter() - started,
+                        "chunks": 0,
+                    }
+                )
+                continue
+
+            samples = np.asarray(wav, dtype=np.float32).reshape(-1)
+            elapsed = time.perf_counter() - started
+            if samples.size:
+                _emit(
+                    {
+                        "type": "audio",
+                        "id": request_id,
+                        "sample_rate": SAMPLE_RATE,
+                        "pcm_f32le": base64.b64encode(samples.tobytes()).decode("ascii"),
+                    }
+                )
             _emit(
                 {
                     "type": "done",
                     "id": request_id,
-                    "cancelled": cancelled_during_run,
-                    "first_audio_seconds": first_audio_seconds,
-                    "generation_seconds": time.perf_counter() - started,
-                    "chunks": chunk_count,
+                    "cancelled": False,
+                    "first_audio_seconds": elapsed if samples.size else None,
+                    "generation_seconds": elapsed,
+                    "chunks": 1 if samples.size else 0,
                 }
             )
+        except Exception as exc:
+            traceback.print_exc(file=sys.stderr)
+            _emit({"type": "error", "id": request_id, "message": str(exc)})
         finally:
             with cancel_lock:
                 cancelled.discard(request_id)
