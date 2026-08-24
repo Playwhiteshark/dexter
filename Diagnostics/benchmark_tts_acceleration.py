@@ -1,19 +1,21 @@
-"""Compare NeuTTS-2E Q8 backbone execution on CPU and Intel Arc Vulkan.
+"""Compare NeuTTS-2E Q8 backbone execution paths.
 
 This benchmark keeps the voice, Q8 model, text, ONNX NeuCodec decoder, and
 worker protocol fixed. Only the GGUF backbone execution changes.
 
 Cases:
-- CPU / NeuTTS default thread heuristic (8 threads on the Core Ultra 7 255H)
+- CPU / NeuTTS default thread heuristic
 - CPU / explicit 16 generation threads
-- GPU / Vulkan device 0 (expected Intel Arc 140T on this machine)
+- Intel Arc candidate / Vulkan visible device 0
+- Optional RTX control / Vulkan visible device 1
 
-The Vulkan worker writes llama.cpp device discovery to stderr. Verify that the
-GPU case names Intel Arc 140T; abort the interpretation if it names the RTX.
+GPU cases refuse to report a timing as an accelerator result unless the loaded
+llama.cpp library itself reports GPU-offload support and a Vulkan backend.
 """
 
 from __future__ import annotations
 
+import argparse
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -33,6 +35,7 @@ from Runtime.Voice import neutts2e_runtime as runtime
 
 @dataclass(frozen=True)
 class Case:
+    key: str
     label: str
     device: str
     threads: int | None = None
@@ -44,7 +47,14 @@ TEXT = (
     "This benchmark keeps the speech model, speaker, codec, and text identical "
     "while changing only where the language model backbone performs its work. "
     "The result will tell us whether Dexter should use more CPU cores or move "
-    "Paul's backbone onto the Intel Arc graphics processor."
+    "Paul's backbone onto an available graphics processor."
+)
+
+CASES = (
+    Case("cpu-default", "CPU: NeuTTS default thread heuristic", "cpu"),
+    Case("cpu16", "CPU: 16 generation threads", "cpu", threads=16),
+    Case("arc", "Intel Arc candidate: Vulkan device 0", "gpu", vulkan_device="0"),
+    Case("rtx", "RTX control: Vulkan device 1", "gpu", vulkan_device="1"),
 )
 
 
@@ -78,6 +88,31 @@ def _start(case: Case):
     return process, runtime._ProtocolReader(process)
 
 
+def _verify_gpu_ready(case: Case, ready: dict[str, object]) -> None:
+    if case.device != "gpu":
+        return
+
+    supported = bool(ready.get("gpu_offload_supported"))
+    system_info = str(ready.get("llama_system_info") or "")
+    requested_layers = int(ready.get("requested_gpu_layers") or 0)
+
+    if not supported:
+        raise RuntimeError(
+            "This installed llama-cpp-python library reports GPU offload support = false. "
+            "The GPU timing would actually be a CPU fallback. Re-sync the Vulkan wheel "
+            "before interpreting accelerator results."
+        )
+    if "vulkan" not in system_info.lower():
+        raise RuntimeError(
+            "GPU offload is reported, but llama.cpp system info does not name a Vulkan "
+            f"backend: {system_info!r}"
+        )
+    if requested_layers <= 0:
+        raise RuntimeError(
+            f"NeuTTS did not request GPU layer offload (n_gpu_layers={requested_layers})."
+        )
+
+
 def _run(case: Case) -> dict[str, float | str | int | None]:
     print("")
     print("=" * 72)
@@ -93,8 +128,13 @@ def _run(case: Case) -> dict[str, float | str | int | None]:
             f"Ready in {float(ready['load_seconds']):.2f}s; "
             f"backbone={ready.get('backbone_device')}; "
             f"vulkan_device={ready.get('vulkan_device')}; "
-            f"threads={ready.get('threads')}"
+            f"threads={ready.get('actual_threads')}; "
+            f"gpu_offload_supported={ready.get('gpu_offload_supported')}; "
+            f"requested_gpu_layers={ready.get('requested_gpu_layers')}"
         )
+        print(f"llama.cpp system info: {ready.get('llama_system_info')}")
+
+        _verify_gpu_ready(case, ready)
 
         chunks, first_audio, total, timings = runtime._read_stream_request(
             process,
@@ -122,6 +162,7 @@ def _run(case: Case) -> dict[str, float | str | int | None]:
         print(f"Worst chunk deficit:   {worst_deficit:+.3f}s")
 
         return {
+            "key": case.key,
             "label": case.label,
             "load_seconds": float(ready["load_seconds"]),
             "first_audio_seconds": first_audio,
@@ -137,20 +178,26 @@ def _run(case: Case) -> dict[str, float | str | int | None]:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--case",
+        choices=("all", "cpu-default", "cpu16", "arc", "rtx"),
+        default="all",
+        help="Run only one execution path. RTX is opt-in unless selected explicitly.",
+    )
+    args = parser.parse_args()
+
     runtime.doctor("q8")
     print("")
-    print("IMPORTANT: During the GPU case, llama.cpp should print an Intel Arc")
-    print("140T Vulkan device to stderr. If it names the RTX 5050 instead, stop")
-    print("the benchmark with Ctrl+C and do not use that result.")
+    print("GPU results are accepted only if llama.cpp itself confirms Vulkan GPU offload.")
 
-    cases = (
-        Case("CPU: NeuTTS default thread heuristic", "cpu"),
-        Case("CPU: 16 generation threads", "cpu", threads=16),
-        Case("Intel Arc candidate: Vulkan device 0", "gpu", vulkan_device="0"),
-    )
+    if args.case == "all":
+        selected = tuple(case for case in CASES if case.key != "rtx")
+    else:
+        selected = tuple(case for case in CASES if case.key == args.case)
 
     results = []
-    for case in cases:
+    for case in selected:
         results.append(_run(case))
 
     print("")
@@ -169,8 +216,8 @@ def main() -> int:
     print(f"Fastest measured path: {best['label']} (RTF {float(best['rtf']):.3f})")
     if float(best["rtf"]) >= 1.0:
         print(
-            "No tested path is real-time yet. Do not solve that with a larger "
-            "permanent playback buffer; test the next acceleration backend."
+            "No selected path is real-time yet. Do not solve that with a larger "
+            "permanent playback buffer; verify/compare the next acceleration backend."
         )
     return 0
 
