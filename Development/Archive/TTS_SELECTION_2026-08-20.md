@@ -18,7 +18,9 @@ The listening benchmark originally used the PyTorch NeuTTS-2E backbone. A produc
 
 NeuTTS's implementation only exposes `infer_stream()` for its quantized llama.cpp path. Production therefore uses the official **Q8 GGUF NeuTTS-2E backbone** with the **int8 ONNX NeuCodec decoder**, keeping Paul/neutral while enabling chunked CPU output.
 
-An earlier attempt pinned `llama-cpp-python==0.3.20`. That exact pin failed to resolve a suitable prebuilt Windows CPU wheel and pip fell back to a local CMake/NMake build. The production project now resolves llama.cpp from its official CPU-wheel index and explicitly forbids source-building `llama-cpp-python`, so a missing wheel fails immediately rather than introducing compiler tooling.
+The validated Windows/Python 3.13 Q8 smoke test produced approximately **1.11 seconds to first audio**, **8 streamed chunks**, and **3.94 seconds of audio in 5.82 seconds** (RTF ~**1.48**). Mid-stream cancellation also passed. Q8 is therefore the first live candidate. Because RTF remains above 1.0, longer real replies should be checked for audible starvation/gaps before performance is considered final; Q4 or a small measured prebuffer are follow-up options if needed.
+
+An earlier attempt pinned `llama-cpp-python==0.3.20`. That exact pin failed to resolve a suitable prebuilt Windows CPU wheel and pip fell back to a local CMake/NMake build. The production project now resolves llama.cpp from its official CPU-wheel index and explicitly forbids source-building `llama-cpp-python`, so a missing wheel fails immediately rather than introducing compiler tooling. The validated environment resolves `llama-cpp-python 0.3.35` from a binary wheel.
 
 ## Runtime architecture
 
