@@ -60,6 +60,15 @@ class NeuTTS2EBackend:
                 "TOKENIZERS_PARALLELISM": "false",
             }
         )
+
+        # Validated production path on the target machine:
+        # Q8 backbone -> Intel Arc 140T Vulkan0, ONNX codec -> CPU.
+        # Preserve explicit developer overrides when troubleshooting.
+        env.setdefault("DEXTER_TTS_VARIANT", "q8")
+        env.setdefault("DEXTER_TTS_BACKBONE_DEVICE", "gpu")
+        env.setdefault("DEXTER_TTS_VULKAN_DEVICE", "0")
+        env.setdefault("DEXTER_TTS_WATERMARK", "0")
+        env.setdefault("GGML_VK_VISIBLE_DEVICES", env["DEXTER_TTS_VULKAN_DEVICE"])
         return env
 
     def start(self) -> None:
