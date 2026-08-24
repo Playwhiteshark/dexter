@@ -1,14 +1,14 @@
 """Continuous jitter-buffered local playback for Dexter TTS.
 
 NeuTTS can produce valid streamed PCM more slowly and less regularly than the
-sound device consumes it.  Writing each model chunk directly to a blocking
-PortAudio stream makes those scheduling gaps audible.  This sink decouples
+sound device consumes it. Writing each model chunk directly to a blocking
+PortAudio stream makes those scheduling gaps audible. This sink decouples
 model-chunk arrival from the device callback with a small bounded PCM buffer.
 
 The buffer is deliberately measured in audio seconds, not model chunks: chunk
-sizes are an implementation detail of the TTS backend.  On underflow the sink
+sizes are an implementation detail of the TTS backend. On underflow the sink
 outputs silence and waits for a useful reserve before resuming, avoiding rapid
-pause/unpause chatter.  PTT interruption still aborts the PortAudio stream and
+pause/unpause chatter. PTT interruption still aborts the PortAudio stream and
 clears all queued PCM immediately.
 """
 
@@ -68,7 +68,6 @@ class BufferedSoundDeviceAudioSink:
         self._stream: Any | None = None
         self._stream_started = False
         self._rebuffering = False
-        self._first_enqueue_time: float | None = None
         self._generation = 0
         self._closed = False
 
@@ -94,6 +93,7 @@ class BufferedSoundDeviceAudioSink:
 
         # Own the PCM independently of the backend's temporary buffers.
         samples = np.ascontiguousarray(samples, dtype=np.float32).copy()
+        stream_to_start = None
 
         with self._condition:
             if self._closed or cancel_event.is_set():
@@ -126,14 +126,17 @@ class BufferedSoundDeviceAudioSink:
             if self._closed or cancel_event.is_set():
                 return
 
+            was_empty = self._buffered_frames == 0
             self._chunks.append(samples)
             self._buffered_frames += int(samples.shape[0])
-            if self._first_enqueue_time is None:
-                self._first_enqueue_time = time.monotonic()
+            if was_empty and not self._stream_started:
                 self._schedule_start_deadline_locked()
 
-            self._maybe_start_stream_locked(force=False)
+            stream_to_start = self._claim_stream_start_locked(force=False)
             self._condition.notify_all()
+
+        if stream_to_start is not None:
+            self._start_claimed_stream(stream_to_start, propagate=True)
 
     def interrupt(self) -> None:
         with self._condition:
@@ -195,7 +198,9 @@ class BufferedSoundDeviceAudioSink:
             with self._condition:
                 if generation != self._generation or self._closed:
                     return
-                self._maybe_start_stream_locked(force=True)
+                stream = self._claim_stream_start_locked(force=True)
+            if stream is not None:
+                self._start_claimed_stream(stream, propagate=False)
 
         threading.Thread(
             target=deadline,
@@ -203,22 +208,43 @@ class BufferedSoundDeviceAudioSink:
             daemon=True,
         ).start()
 
-    def _maybe_start_stream_locked(self, *, force: bool) -> None:
+    def _claim_stream_start_locked(self, *, force: bool) -> Any | None:
+        """Claim one stream start while holding the lock; start it afterwards."""
         if self._stream is None or self._stream_started or self._closed:
-            return
+            return None
         assert self._sample_rate is not None
 
         target_frames = max(1, int(self.prebuffer_seconds * self._sample_rate))
         if not force and self._buffered_frames < target_frames:
-            return
+            return None
         if self._buffered_frames <= 0:
-            return
+            return None
 
-        # start() is quick and happens on Dexter's playback/deadline worker,
-        # never on Qt or the PortAudio callback itself.
-        self._stream.start()
+        # Mark the start as claimed before releasing the lock so a second model
+        # chunk/deadline thread cannot call PortAudio start() twice.
         self._stream_started = True
         self._rebuffering = False
+        return self._stream
+
+    def _start_claimed_stream(self, stream: Any, *, propagate: bool) -> None:
+        try:
+            # Never hold the PCM-buffer lock across PortAudio start(); PortAudio
+            # may begin invoking the callback before start() returns.
+            stream.start()
+        except Exception:
+            with self._condition:
+                still_current = self._stream is stream
+                if still_current:
+                    self._generation += 1
+                    self._stream = None
+                    self._stream_started = False
+                    self._reset_buffer_locked(clear_format=True)
+                    self._condition.notify_all()
+            self._abort_and_close(stream)
+            if still_current and propagate:
+                raise
+            if still_current:
+                LOGGER.exception("Could not start TTS output stream")
 
     def _audio_callback(
         self,
@@ -230,7 +256,7 @@ class BufferedSoundDeviceAudioSink:
         # PortAudio requires every output frame to be initialized.
         outdata.fill(0)
         if status:
-            # Avoid logging from PortAudio's realtime thread.  Any starvation is
+            # Avoid logging from PortAudio's realtime thread. Any starvation is
             # already represented by the rebuffering state below.
             pass
 
@@ -261,7 +287,7 @@ class BufferedSoundDeviceAudioSink:
                     self._head_offset = 0
 
             # If PortAudio asked for more data than was available, the remainder
-            # is already silence.  Do not resume on the very next tiny model
+            # is already silence. Do not resume on the very next tiny model
             # chunk: accumulate a useful reserve first, which turns rapid
             # pause/unpause chatter into at most one deliberate refill pause.
             if written < frames:
@@ -274,7 +300,6 @@ class BufferedSoundDeviceAudioSink:
         self._head_offset = 0
         self._buffered_frames = 0
         self._rebuffering = False
-        self._first_enqueue_time = None
         if clear_format:
             self._sample_rate = None
             self._channels = None
