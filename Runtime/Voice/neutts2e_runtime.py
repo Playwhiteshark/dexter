@@ -87,6 +87,14 @@ def runtime_env(variant: str | None = None) -> dict[str, str]:
     )
     if variant is not None:
         env["DEXTER_TTS_VARIANT"] = variant
+
+    # Match the live Host defaults so `smoke` and `capture` exercise the real
+    # production execution path rather than silently falling back to CPU.
+    env.setdefault("DEXTER_TTS_VARIANT", "q8")
+    env.setdefault("DEXTER_TTS_BACKBONE_DEVICE", "gpu")
+    env.setdefault("DEXTER_TTS_VULKAN_DEVICE", "0")
+    env.setdefault("DEXTER_TTS_PIPELINE_WATERMARK", "1")
+    env.setdefault("GGML_VK_VISIBLE_DEVICES", env["DEXTER_TTS_VULKAN_DEVICE"])
     return env
 
 
