@@ -42,28 +42,58 @@ Moonshine's current shipped runtime is intentionally CPU-only. Its `.ort` artifa
 
 ### TTS
 
-NeuTTS-2E / Paul is functionally integrated. Current CPU results:
+NeuTTS-2E / Paul is integrated and the original choppy playback has now been traced to sustained synthesis starvation rather than corrupt PCM.
 
-- Q8 GGUF: ~1.11 s first audio, RTF ~1.48, 8 chunks.
-- Q4 GGUF: ~1.10 s first audio, RTF ~1.71, 9 chunks. Q4 was slower on this machine.
+Initial CPU measurements:
 
-The first full-app audit showed the NeuTTS worker reaching roughly 74% whole-machine CPU while speaking and no GPU-engine activity. This makes TTS the strongest first candidate for offloading to otherwise-idle accelerator hardware.
+- Q8 GGUF: roughly RTF 1.5-1.6, about 1.1 s first audio.
+- Q4 GGUF: roughly RTF 1.7 and slower than Q8 on this machine.
+- forcing 16 llama.cpp generation threads was slightly slower than NeuTTS's default eight threads.
 
-A dedicated capture diagnostic concatenated the exact Q8 streamed PCM into a WAV without real-time playback. That WAV sounded smooth. Therefore the model/codec output itself is good and the audible stop/start belongs to Dexter's live playback scheduling rather than NeuTTS's generated waveform.
+A raw streamed-PCM capture sounded smooth, proving that NeuTTS/NeuCodec generated valid audio. The live cuts occurred because Q8 CPU generation produced each nominal 0.5 s audio block in roughly 0.7-0.85 s, so any finite playback reserve eventually ran dry.
 
-Production live playback now uses a callback-driven bounded PCM jitter buffer rather than writing each model chunk directly through SoundDevice's blocking `OutputStream.write()` path. It prebuffers a small reserve, feeds PortAudio continuously from the callback, and after a true underflow waits for a useful reserve before resuming instead of rapidly alternating sound and silence. PTT interruption still aborts the output stream and clears the reserve immediately.
+Stage profiling then showed NeuCodec was only about 8% of synthesis time; the GGUF/token path dominated. That made the otherwise-idle Arc iGPU the highest-leverage accelerator target.
 
-This playback buffer is not a substitute for inference acceleration. With Q8 still at RTF ~1.48, a sufficiently long response can still consume its reserve faster than TTS replenishes it. The goal of the Arc experiment is to move Q8 below real-time so prebuffering becomes protection against jitter rather than compensation for sustained slow inference.
+#### Verified Intel Arc path
 
-The likely first accelerator experiment remains the **GGUF backbone on the Intel Arc iGPU**. `llama.cpp` supports Intel GPUs through Vulkan and SYCL. Vulkan should be benchmarked before installing a compiler/oneAPI toolchain for a custom SYCL Python build.
+The project now uses the prebuilt Vulkan `llama-cpp-python` wheel. Native llama.cpp logs verified the real accelerator path rather than relying on a device flag alone:
 
-The NeuCodec ONNX decoder is a separate stage. Upstream NeuTTS currently restricts its ONNX codec path to CPU. Moving that decoder to OpenVINO/Arc/NPU would require a targeted adapter or fork and separate measurements, so it should not be mixed into the first backbone experiment.
+- `Vulkan0 = Intel(R) Arc(TM) 140T GPU`;
+- `matrix cores: KHR_coopmat`;
+- 29/29 model layers offloaded to Vulkan0;
+- the KV cache is on Vulkan0;
+- the RTX 5050 is not used by TTS.
+
+Serial Arc + Perth improved the clean benchmark from roughly RTF 1.64 on CPU to **RTF 1.218**, with first audio around **0.703 s**. That was a substantial speedup but still not enough for indefinitely smooth playback.
+
+A no-Perth diagnostic reached **RTF 0.826**, proving the Arc hardware itself was already fast enough and exposing synchronous Perth watermarking as the hidden serial bottleneck. Production does not remove Perth.
+
+#### Pipelined Perth production path
+
+NeuTTS 1.4.1 normally performs Arc GGUF generation, CPU ONNX decode, Perth watermarking, and overlap-add serially. These are partly independent stages on different hardware, so Dexter now pipelines them:
+
+- a bounded producer thread continues GGUF speech-token generation on Arc;
+- the consumer performs the same CPU NeuCodec decode;
+- the same Perth watermark is applied;
+- the same crop and overlap-add order is preserved;
+- chunks remain ordered and cancellation bounds speculative work.
+
+The verified pipelined result with Perth still enabled was:
+
+- **RTF 0.782**;
+- **first audio 0.775 s**;
+- average post-first-chunk surplus about **0.123 s per nominal 0.5 s chunk**;
+- worst measured steady-state deficit only **+0.004 s**.
+
+This is the selected production TTS path: Q8 backbone on Intel Arc 140T Vulkan0, NeuCodec + Perth on CPU, pipelined scheduling.
+
+Production live playback remains callback-driven through PortAudio, but the buffer is now a jitter reserve rather than a workaround for permanently slow synthesis. The default startup/rebuffer reserve was reduced from 1.0/0.75 s to **0.5/0.5 s**. PTT interruption still aborts output and clears buffered PCM immediately.
 
 ### NPU
 
 The Intel AI Boost NPU is present on Windows 11 and can be reconsidered through OpenVINO. Availability alone does not make a model a good NPU target: operator coverage, graph partitioning, conversion cost, latency and memory need to be measured per workload.
 
-For the current stack, NeuTTS's GGUF backbone is a llama.cpp workload rather than an OpenVINO graph, so the Arc iGPU is the simpler first accelerator target. The ONNX codec and future converted models are more natural candidates for later NPU experiments.
+For the current stack, NeuTTS's GGUF backbone is a llama.cpp workload rather than an OpenVINO graph. The ONNX codec is now a small minority of TTS time and no longer a priority after the Arc + pipeline result. Future converted models remain more natural NPU experiments.
 
 ### MCP tools
 
@@ -81,16 +111,18 @@ Do not make the whole MCP server demand-start on first tool call unless Goose/AC
 
 ## Process-wrapper note
 
-The audit shows tiny ~0.8 MB venv launcher processes plus the real base-Python child process for several uv/venv launches. Those launchers are negligible. The significant resident allocations are in the base interpreter/model-owning processes: roughly 1.4 GB private for Host+STT, roughly 3.0 GB private for TTS, and roughly 565 MB private for MCP tools in the first audit.
+The audit shows tiny ~0.8 MB venv launcher processes plus the real base-Python child process for several uv/venv launches. Those launchers are negligible. The significant resident allocations are in the base interpreter/model-owning processes: roughly 1.4 GB private for Host+STT, roughly 3.0 GB private for TTS in the original CPU-era audit, and roughly 565 MB private for MCP tools.
 
 Do not interpret the number of `python.exe` entries alone as duplicated model weights; inspect command lines, parent PIDs and actual private-memory owners.
+
+A fresh full-app audit should be taken after the new Arc/pipelined TTS path is live because CPU utilization and TTS residency may now differ materially from the original baseline.
 
 ## Hardware priorities
 
 1. **RTX 5050** — keep the main LLM on CUDA unless a controlled benchmark proves a better split.
-2. **Intel Arc integrated GPU** — first unused accelerator to benchmark, initially for the NeuTTS GGUF backbone.
+2. **Intel Arc 140T** — now owns the NeuTTS Q8 GGUF backbone and has converted TTS from slower-than-real-time to RTF ~0.78 with pipelined Perth.
 3. **Intel AI Boost NPU** — valid Windows 11 accelerator, to test through OpenVINO only where model/operator support makes sense.
-4. **CPU** — Moonshine STT remains here initially; also handles orchestration and unsupported operators.
+4. **CPU** — Moonshine STT, NeuCodec, Perth watermarking, orchestration, and unsupported operators.
 
 Do not move the main Gemma model from CUDA to the iGPU merely to use otherwise-idle hardware. A shared-memory iGPU consumes system RAM and may be substantially slower than CUDA. Mixed-device changes need a controlled benchmark and must not make the main LLM slower just to reduce VRAM pressure.
 
@@ -110,13 +142,12 @@ The profiler records:
 
 The profiler ending does not stop Dexter or TTS; it only stops recording samples.
 
-## Optimization order after baseline
+## Optimization order after TTS fix
 
-1. Validate the callback/jitter-buffer playback path in the live Host.
-2. Benchmark NeuTTS Q8 on the Arc iGPU, keeping the ONNX decoder unchanged initially.
-3. If Q8 becomes comfortably real-time and audio quality is clean, integrate explicit device selection and reduce the playback reserve as far as practical.
-4. Profile and lazy-load heavyweight optional MCP tool implementations.
-5. Profile Host/STT memory and latency. Keep Moonshine resident if its load cost and PTT-latency benefit justify it; only consider unload/reload after measuring both costs.
-6. Audit the main LLM's RTX/host-RAM split and context allocation separately. Do not mix that experiment with TTS changes.
-7. Test NPU-suitable OpenVINO workloads only after the higher-confidence Arc/TTS path is understood.
-8. Only after performance is stable, do the broader idle-memory/efficiency pass.
+1. Validate the production Arc + pipelined-Perth path in the live Host: smoothness, first-audio latency, cancellation, and response boundaries.
+2. Take a fresh full-app performance audit with the new TTS path and compare CPU/RAM/GPU residency against the original baseline.
+3. Profile and lazy-load heavyweight optional MCP tool implementations.
+4. Profile Host/STT memory and latency. Keep Moonshine resident if its load cost and PTT-latency benefit justify it; only consider unload/reload after measuring both costs.
+5. Audit the main LLM's RTX/host-RAM split and context allocation separately. Do not mix that experiment with TTS changes.
+6. Test NPU-suitable OpenVINO workloads only after higher-confidence memory/latency wins are exhausted.
+7. Only after interactive performance is stable, do the broader idle-memory/efficiency pass.
