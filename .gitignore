@@ -48,6 +48,7 @@ Runtime/Model Gateway/Scheduled Task/
 # Keep the scripts that generate them.
 # ============================================================
 Diagnostics/jarvis-config-audit_*.md
+Diagnostics/runtime-performance-audit_*.json
 
 # ============================================================
 # Local duplicate/package copies of Dexter Tools
