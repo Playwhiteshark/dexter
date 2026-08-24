@@ -19,7 +19,6 @@ import os
 import shutil
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -34,11 +33,9 @@ OLD_BENCHMARK_RUNTIME = Path(
     os.environ.get("LOCALAPPDATA") or os.environ.get("TEMP") or str(REPO_ROOT)
 ) / "DexterTTSBench" / "neutts"
 
-CPU_WHEEL_INDEX = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
 PACKAGE_ARGS = (
     "neutts==1.4.1",
     "onnxruntime==1.29.0",
-    "llama-cpp-python==0.3.20",
 )
 
 
@@ -139,7 +136,7 @@ def setup() -> None:
     python = _venv_python()
     if python.exists():
         probe = subprocess.run(
-            [str(python), "-c", "import neutts, onnxruntime, llama_cpp"],
+            [str(python), "-c", "import neutts, onnxruntime"],
             env=_runtime_env(),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -173,15 +170,13 @@ def setup() -> None:
         "--no-cache-dir",
         "--constraint",
         str(CONSTRAINTS),
-        "--extra-index-url",
-        CPU_WHEEL_INDEX,
         *PACKAGE_ARGS,
     ]
     try:
         print("Installing pinned NeuTTS-2E CPU stack (pip cache disabled)...")
         subprocess.run(command, check=True, env=_runtime_env())
         subprocess.run(
-            [str(python), "-c", "import neutts, onnxruntime, llama_cpp"],
+            [str(python), "-c", "import neutts, onnxruntime"],
             check=True,
             env=_runtime_env(),
         )
@@ -212,7 +207,7 @@ def status() -> None:
         print("Stack:    not installed")
         return
     probe = subprocess.run(
-        [str(python), "-c", "import neutts, onnxruntime, llama_cpp"],
+        [str(python), "-c", "import neutts, onnxruntime"],
         env=_runtime_env(),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -242,12 +237,15 @@ def smoke() -> None:
     assert process.stdout is not None
 
     try:
-        ready = json.loads(process.stdout.readline())
+        ready_line = process.stdout.readline()
+        if not ready_line:
+            raise SystemExit(f"Worker exited before startup completed (exit={process.poll()})")
+        ready = json.loads(ready_line)
         if ready.get("type") != "ready":
             raise SystemExit(f"Worker failed to start: {ready}")
         print(
-            f"Ready: Paul / Q8 GGUF in {float(ready['load_seconds']):.2f}s. "
-            "Measuring streaming latency..."
+            f"Ready: Paul / PyTorch in {float(ready['load_seconds']):.2f}s. "
+            "Measuring sentence synthesis latency..."
         )
 
         request_id = 1
@@ -260,7 +258,10 @@ def smoke() -> None:
         audio_bytes = 0
         chunks = 0
         while True:
-            message = json.loads(process.stdout.readline())
+            line = process.stdout.readline()
+            if not line:
+                raise SystemExit(f"Worker exited during smoke test (exit={process.poll()})")
+            message = json.loads(line)
             if message.get("type") == "audio":
                 if first_audio is None:
                     first_audio = time.perf_counter() - started
@@ -271,7 +272,7 @@ def smoke() -> None:
                 audio_seconds = audio_bytes / 4 / 24_000
                 rtf = total / audio_seconds if audio_seconds else float("inf")
                 print(f"First audio: {first_audio:.3f}s" if first_audio is not None else "First audio: none")
-                print(f"Generated:   {audio_seconds:.3f}s audio in {total:.3f}s ({chunks} chunks, RTF {rtf:.3f})")
+                print(f"Generated:   {audio_seconds:.3f}s audio in {total:.3f}s ({chunks} chunk(s), RTF {rtf:.3f})")
                 return
             elif message.get("type") in {"error", "fatal"}:
                 raise SystemExit(f"Worker error: {message.get('message')}")
