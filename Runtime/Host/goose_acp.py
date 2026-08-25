@@ -238,12 +238,27 @@ class GooseACP:
         if conn is None:
             raise RuntimeError("Goose ACP connection is not ready.")
 
+        old_session_id = self._session_id
         session = await conn.new_session(
             cwd=str(self.cwd),
             mcp_servers=[],
         )
-        self._session_id = session.session_id
+        new_session_id = session.session_id
 
+        if old_session_id is not None and old_session_id != new_session_id:
+            try:
+                await conn.close_session(session_id=old_session_id)
+            except Exception:
+                # Do not abandon a second live Goose session if closing the old
+                # one fails. Best-effort close the replacement and preserve the
+                # original session so Clear Chat can report failure cleanly.
+                try:
+                    await conn.close_session(session_id=new_session_id)
+                except Exception:
+                    pass
+                raise
+
+        self._session_id = new_session_id
         self._permission_policy.reset()
         self._permission_allow_once_id = None
         self._permission_file_path = None
