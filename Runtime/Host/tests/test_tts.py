@@ -67,6 +67,18 @@ class SpeechTextBufferTests(unittest.TestCase):
         )
         self.assertEqual(buffer.flush(), ["The next"])
 
+    def test_clause_punctuation_does_not_split_an_utterance(self) -> None:
+        buffer = SpeechTextBuffer()
+        self.assertEqual(
+            buffer.feed("Dexter should keep this clause together, while the sentence"),
+            [],
+        )
+        self.assertEqual(
+            buffer.feed(" is still arriving. The next"),
+            ["Dexter should keep this clause together, while the sentence is still arriving."],
+        )
+        self.assertEqual(buffer.flush(), ["The next"])
+
     def test_long_unpunctuated_text_is_bounded(self) -> None:
         buffer = SpeechTextBuffer(max_chars=80)
         text = ("word " * 30).strip()
