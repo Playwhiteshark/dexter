@@ -37,6 +37,76 @@ class _ProducerError:
 _SENTINEL = object()
 
 
+def _frame_weight(frame: np.ndarray) -> np.ndarray:
+    """Return NeuTTS's exact linear overlap-add weight for one 1-D frame."""
+    length = int(frame.shape[-1])
+    t = np.linspace(0, 1, length + 2, dtype=frame.dtype)[1:-1]
+    return 0.5 - np.abs(t - 0.5)
+
+
+def _incremental_overlap_segment(
+    previous: np.ndarray | None,
+    current: np.ndarray,
+    *,
+    stride: int,
+    final: bool,
+) -> np.ndarray:
+    """Produce only the not-yet-emitted overlap-add segment.
+
+    NeuTTS's upstream implementation recomputes ``_linear_overlap_add`` over
+    every decoded window after each new chunk, then slices away all audio that
+    was already emitted. With Dexter's window geometry each frame is shorter
+    than two strides, so the new segment can only depend on the current frame
+    and the immediately preceding frame. Computing those two contributions is
+    mathematically identical for the emitted segment while making streaming
+    overlap-add O(n) instead of O(n^2) over an utterance.
+    """
+    if current.ndim != 1:
+        current = np.asarray(current).reshape(-1)
+    if previous is not None and previous.ndim != 1:
+        previous = np.asarray(previous).reshape(-1)
+
+    if previous is not None and int(previous.shape[-1]) >= 2 * stride:
+        raise RuntimeError("NeuTTS overlap window unexpectedly spans more than two strides")
+    if int(current.shape[-1]) >= 2 * stride:
+        raise RuntimeError("NeuTTS overlap window unexpectedly spans more than two strides")
+
+    # Local coordinates: current starts at 0; previous starts at -stride.
+    start = 0
+    if final:
+        previous_end = int(previous.shape[-1]) - stride if previous is not None else 0
+        end = max(int(current.shape[-1]), previous_end)
+    else:
+        end = stride
+
+    if end <= start:
+        return np.empty(0, dtype=current.dtype)
+
+    out = np.zeros(end - start, dtype=current.dtype)
+    sum_weight = np.zeros(end - start, dtype=current.dtype)
+
+    if previous is not None:
+        prev_weight = _frame_weight(previous)
+        prev_local_start = stride
+        prev_local_end = min(int(previous.shape[-1]), stride + end)
+        if prev_local_end > prev_local_start:
+            count = prev_local_end - prev_local_start
+            out[:count] += previous[prev_local_start:prev_local_end] * prev_weight[
+                prev_local_start:prev_local_end
+            ]
+            sum_weight[:count] += prev_weight[prev_local_start:prev_local_end]
+
+    curr_weight = _frame_weight(current)
+    curr_local_end = min(int(current.shape[-1]), end)
+    if curr_local_end > 0:
+        out[:curr_local_end] += current[:curr_local_end] * curr_weight[:curr_local_end]
+        sum_weight[:curr_local_end] += curr_weight[:curr_local_end]
+
+    if not np.all(sum_weight > 0):
+        raise RuntimeError("NeuTTS incremental overlap-add produced an uncovered sample")
+    return out / sum_weight
+
+
 def _pipelined_infer_stream_ggml(
     self,
     ref_codes,
@@ -157,8 +227,7 @@ def _pipelined_infer_stream_ggml(
     )
     producer_thread.start()
 
-    audio_cache: list[np.ndarray] = []
-    n_decoded_samples = 0
+    previous_recon: np.ndarray | None = None
 
     try:
         while True:
@@ -178,18 +247,15 @@ def _pipelined_infer_stream_ggml(
                 recon = recon[value.sample_start :]
             else:
                 recon = recon[value.sample_start : value.sample_end]
-            audio_cache.append(recon)
 
-            processed_recon = neutts_core._linear_overlap_add(
-                audio_cache,
+            processed_recon = _incremental_overlap_segment(
+                previous_recon,
+                recon,
                 stride=self.streaming_stride_samples,
+                final=value.final,
             )
-            if value.final:
-                yield processed_recon[n_decoded_samples:]
-            else:
-                new_samples_end = len(audio_cache) * self.streaming_stride_samples
-                yield processed_recon[n_decoded_samples:new_samples_end]
-                n_decoded_samples = new_samples_end
+            previous_recon = recon
+            yield processed_recon
     finally:
         stop_event.set()
         producer_thread.join(timeout=2.0)
