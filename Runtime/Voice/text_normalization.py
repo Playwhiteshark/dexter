@@ -7,9 +7,11 @@ assistant-output policy that the production voice actually needs:
 * single-underscore emphasis and snake_case become ordinary word boundaries;
 * word-style hyphens become spaces, while negatives/dates/phone numbers remain
   intact for semantic normalization;
+* double quotation marks are removed from speech-only text because NeuTTS-2E
+  handles them unreliably; ordinary sentence punctuation remains for prosody;
 * AI is rendered as ``A I`` everywhere, based on the production voice tests;
 * JSON is rendered as the preferred spoken form ``jay son``; and
-* source punctuation is retained because NeuTTS uses it for pauses/prosody.
+* useful source punctuation is retained because NeuTTS uses it for pauses/prosody.
 
 No model, phonemizer, background process, or heavy NLP dependency lives here.
 """
@@ -30,6 +32,7 @@ _IDENTIFIER_UNDERSCORE_RE = re.compile(r"(?<=[A-Za-z])_(?=[A-Za-z])")
 _WORD_HYPHEN_RE = re.compile(
     r"(?<=[A-Za-z])-(?=[A-Za-z0-9])|(?<=[A-Za-z0-9])-(?=[A-Za-z])"
 )
+_SPEECH_MARKS_RE = re.compile(r'["“”„‟«»]')
 _AI_RE = re.compile(r"\bAI\b")
 _JSON_RE = re.compile(r"\bJSON\b")
 
@@ -52,9 +55,10 @@ class SpeechTextNormalizer:
         )
 
         # Utterwise's plain renderer intentionally drops punctuation. NeuTTS
-        # benefits from the punctuation already present in normal prose, so use
-        # Utterwise's source-aligned semantic replacements while keeping source
-        # punctuation and whitespace between tokens.
+        # benefits from ordinary sentence punctuation in normal prose, so use
+        # Utterwise's source-aligned semantic replacements while keeping that
+        # punctuation and the source whitespace between tokens. Quotation marks
+        # are removed earlier because they have proven unreliable in NeuTTS-2E.
         cleaned = result.cleaned_text
         parts: list[str] = []
         cursor = 0
@@ -85,6 +89,11 @@ class SpeechTextNormalizer:
         value = _SINGLE_UNDERSCORE_EMPHASIS_RE.sub(r"\1", text)
         value = _IDENTIFIER_UNDERSCORE_RE.sub(" ", value)
         value = _WORD_HYPHEN_RE.sub(" ", value)
+
+        # Quotation marks do not need to be spoken and have caused unstable
+        # pronunciation/prosody in NeuTTS-2E. Remove only double-quote glyphs;
+        # apostrophes remain intact for contractions and possessives.
+        value = _SPEECH_MARKS_RE.sub("", value)
 
         # Dash glyphs have been unreliable in NeuTTS prose. A comma retains
         # their pause semantics; ASCII minus signs are deliberately untouched.
