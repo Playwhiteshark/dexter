@@ -110,72 +110,125 @@ def _synthesize(tts) -> dict[str, float | int]:
     }
 
 
-def _ollama_load(stop: threading.Event, active: threading.Event, stats: dict[str, object]) -> None:
-    """Keep the production Gemma model actively generating during TTS."""
+def _ollama_request(payload: dict[str, object], *, timeout: float = 180.0) -> bytes:
+    request = urllib.request.Request(
+        OLLAMA_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read()
+
+
+def _preload_ollama() -> None:
+    """Ensure Gemma is resident before the measured contention request starts."""
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": "Reply with the word ready.",
+        "stream": False,
+        "keep_alive": "5m",
+        "options": {"num_predict": 4},
+    }
+    _ollama_request(payload)
+
+
+def _ollama_load(
+    dispatched: threading.Event,
+    finished: threading.Event,
+    stats: dict[str, object],
+) -> None:
+    """Run one deliberately long Gemma request while TTS is measured.
+
+    Some Ollama/model combinations do not expose token-sized HTTP lines even
+    with stream=True. Therefore the benchmark must not use receipt of the first
+    response line as its concurrency signal. Gemma is preloaded before this
+    thread starts; ``dispatched`` means the long request is about to enter
+    urlopen, and the caller validates that it remains unfinished throughout the
+    complete TTS timing window.
+    """
     prompt = (
         "Write a long, detailed technical essay explaining transformer inference, "
         "quantization, KV caches, mixture-of-experts routing, and GPU/CPU offload. "
         "Continue in depth until the requested token budget is exhausted."
     )
-    payload = json.dumps(
-        {
-            "model": OLLAMA_MODEL,
-            "prompt": prompt,
-            "stream": True,
-            "keep_alive": "5m",
-            "options": {"num_predict": 1024},
-        }
-    ).encode("utf-8")
-    request = urllib.request.Request(
-        OLLAMA_URL,
-        data=payload,
-        method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    lines = 0
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "keep_alive": "5m",
+        "options": {"num_predict": 1024},
+    }
     started = time.perf_counter()
+    stats["request_started"] = started
+    dispatched.set()
     try:
-        with urllib.request.urlopen(request, timeout=180) as response:
-            for raw in response:
-                if raw.strip():
-                    lines += 1
-                    active.set()
-                if stop.is_set():
-                    break
-        stats["lines"] = lines
-        stats["seconds"] = round(time.perf_counter() - started, 3)
+        raw = _ollama_request(payload, timeout=240.0)
+        completed = time.perf_counter()
+        stats["request_completed"] = completed
+        stats["seconds"] = round(completed - started, 3)
+        try:
+            data = json.loads(raw)
+            stats["eval_count"] = int(data.get("eval_count", 0) or 0)
+            stats["prompt_eval_count"] = int(data.get("prompt_eval_count", 0) or 0)
+            stats["done"] = bool(data.get("done", False))
+        except Exception:
+            stats["response_bytes"] = len(raw)
     except BaseException as exc:
         stats["error"] = f"{type(exc).__name__}: {exc}"
-        active.set()
+        stats["request_completed"] = time.perf_counter()
+    finally:
+        finished.set()
 
 
-def _concurrent_synthesize(tts) -> tuple[dict[str, float | int], dict[str, object]]:
-    stop = threading.Event()
-    active = threading.Event()
+def _concurrent_synthesize(tts) -> tuple[dict[str, float | int | bool], dict[str, object]]:
+    # Preload outside the measured window. This avoids accidentally measuring
+    # model load/first-token setup instead of normal concurrent generation.
+    _preload_ollama()
+
+    dispatched = threading.Event()
+    finished = threading.Event()
     stats: dict[str, object] = {}
     thread = threading.Thread(
         target=_ollama_load,
-        args=(stop, active, stats),
+        args=(dispatched, finished, stats),
         name="DexterBatchABGemmaLoad",
         daemon=True,
     )
     thread.start()
-    if not active.wait(timeout=180):
-        stop.set()
-        raise RuntimeError("Gemma/Ollama did not begin streaming within 180 seconds")
-    if "error" in stats:
-        stop.set()
-        raise RuntimeError(f"Gemma/Ollama load failed: {stats['error']}")
+    if not dispatched.wait(timeout=10.0):
+        raise RuntimeError("Gemma/Ollama contention request was not dispatched")
 
-    # Give generation a short head start so TTS begins while Gemma is already
-    # exercising its normal CPU/GPU offload path rather than during first-token setup.
-    time.sleep(0.35)
-    try:
-        result = _synthesize(tts)
-    finally:
-        stop.set()
-        thread.join(timeout=5.0)
-    result["ollama_lines_during_window"] = int(stats.get("lines", 0))
+    # Give the already-resident runner enough time to enter decode. The long
+    # request is intentionally much longer than this TTS utterance.
+    time.sleep(1.0)
+    if finished.is_set():
+        if "error" in stats:
+            raise RuntimeError(f"Gemma/Ollama load failed: {stats['error']}")
+        raise RuntimeError(
+            "Gemma contention request finished before TTS began; benchmark cannot prove overlap"
+        )
+
+    tts_started = time.perf_counter()
+    result = _synthesize(tts)
+    tts_completed = time.perf_counter()
+
+    # This is the critical validity check. If Gemma finished before TTS did,
+    # the run did not maintain full contention across the speech measurement.
+    gemma_active_at_tts_end = not finished.is_set()
+    result["gemma_active_at_tts_end"] = gemma_active_at_tts_end
+    result["overlap_seconds"] = round(tts_completed - tts_started, 3)
+    if not gemma_active_at_tts_end:
+        completed = float(stats.get("request_completed", 0.0) or 0.0)
+        overlap = max(0.0, completed - tts_started) if completed else 0.0
+        raise RuntimeError(
+            "Gemma contention request ended before TTS completed "
+            f"(only {overlap:.3f}s overlap); refusing to report invalid concurrent numbers"
+        )
+
+    # We do not need to wait for all 1024 tokens before reporting the TTS
+    # result. The thread is daemonized and the child process exits immediately
+    # after emitting its result, which terminates the outstanding HTTP request.
     return result, stats
 
 
@@ -262,8 +315,15 @@ def _run_variant(label: str, batch: int, ubatch: int, concurrent: bool) -> dict[
 def _parent(concurrent: bool) -> int:
     if concurrent:
         print("Dexter concurrent Gemma + TTS batch A/B")
-        print("Quit Dexter, but leave Ollama running. Comparing only 512 vs 128.\n")
-        variants = [("batch512", 512, 512), ("batch128", 128, 128)]
+        print(
+            "Quit Dexter, but leave Ollama running. Gemma is preloaded and each reported "
+            "TTS run is rejected unless the long Gemma request remains active for the full window.\n"
+        )
+        variants = [
+            ("batch512", 512, 512),
+            ("batch256", 256, 256),
+            ("batch128", 128, 128),
+        ]
     else:
         print("Dexter isolated TTS batch performance A/B")
         print("Quit Dexter before running this probe. Each row is a fresh Python process.\n")
@@ -283,7 +343,7 @@ def _parent(concurrent: bool) -> int:
             print(
                 f"  load={result['load_seconds']:>6.2f}s  "
                 f"RTF={take['rtf']:.3f} TTFA={take['first_audio_seconds']:.3f}s  "
-                f"Gemma stream lines={take['ollama_lines_during_window']}"
+                f"Gemma active through TTS={take['gemma_active_at_tts_end']}"
             )
         else:
             first = result["first"]
