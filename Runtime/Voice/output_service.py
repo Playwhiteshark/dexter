@@ -19,6 +19,7 @@ from Runtime.Voice.tts_trace import (
     TracingSpeechBackend,
     TracingVoiceOutput,
     enabled as tts_trace_enabled,
+    event as tts_trace_event,
 )
 
 ErrorCallback = Callable[[str], None]
@@ -40,11 +41,13 @@ def _production_output() -> VoiceOutput:
     # TTS playback uses Core Audio/WASAPI directly so Dexter follows the live
     # Windows default render endpoint when headphones/speakers are plugged or
     # unplugged. STT remains on sounddevice/PortAudio and is not reinitialized.
+    tracing = tts_trace_enabled()
     sink = WindowsDefaultAudioSink(
         expected_sample_rate=_NEUTTS_SAMPLE_RATE,
         expected_channels=_NEUTTS_CHANNELS,
+        trace_callback=tts_trace_event if tracing else None,
     )
-    if tts_trace_enabled():
+    if tracing:
         # Put normalization outside the tracing backend so synthesis traces show
         # the exact text NeuTTS receives rather than the visible source.
         return TracingVoiceOutput(
