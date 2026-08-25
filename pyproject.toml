@@ -9,6 +9,7 @@ dependencies = [
   "PySide6-Essentials==6.11.1",
   "numpy>=2.2.6,<3",
   "sounddevice>=0.5,<1",
+  "soundcard==0.4.6",
   "neutts==1.4.1",
   "utterwise==0.1.1",
   "onnxruntime==1.29.0",
