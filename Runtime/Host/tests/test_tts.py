@@ -170,6 +170,40 @@ class VoiceOutputTests(unittest.TestCase):
             backend.release_first.set()
             output.stop()
 
+    def test_text_queue_overflow_drops_oldest_without_cancelling_response(self) -> None:
+        backend = _BlockingFirstBackend()
+        sink = _FakeSink()
+        output = VoiceOutput(
+            backend,
+            sink=sink,
+            max_text_queue=2,
+            max_coalesced_units=1,
+        )
+        output.start()
+        try:
+            output.begin_response()
+            output.add_text("First sentence. ")
+            self.assertTrue(backend.first_started.wait(1.0))
+
+            # While the first sentence is actively synthesizing, two pending
+            # units fill the bounded queue and the fourth forces overflow.
+            output.add_text("Second sentence. Third sentence. Fourth sentence. ")
+            self.assertFalse(output._cancel_event.is_set())
+
+            backend.release_first.set()
+            deadline = time.monotonic() + 1.0
+            while len(backend.requests) < 3 and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            self.assertEqual(
+                backend.requests,
+                ["First sentence.", "Third sentence.", "Fourth sentence."],
+            )
+            self.assertFalse(output._cancel_event.is_set())
+        finally:
+            backend.release_first.set()
+            output.stop()
+
     def test_interrupt_invalidates_current_response(self) -> None:
         backend = _FakeBackend()
         sink = _FakeSink()
