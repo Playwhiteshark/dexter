@@ -10,7 +10,7 @@ Run with Dexter fully quit:
 
 The configurations intentionally keep n_ctx=2048, full Arc/Vulkan offload,
 Flash Attention, and the validated 8 generation threads unchanged. We vary only
-`use_mlock` and then batch/ubatch size.
+`use_mlock` and batch/ubatch size.
 """
 
 from __future__ import annotations
@@ -149,7 +149,6 @@ def _child(label: str, mlock: bool, batch: int, ubatch: int) -> int:
         seed=42,
     )
     load_seconds = time.perf_counter() - started
-    # Keep the object strongly referenced while accounting is sampled.
     assert model is not None
     time.sleep(0.25)
     after = _memory()
@@ -179,7 +178,9 @@ def _parent() -> int:
     variants = [
         ("production", True, 512, 512),
         ("no_mlock", False, 512, 512),
-        ("no_mlock_batch256", False, 256, 256),
+        ("batch256_mlock", True, 256, 256),
+        ("batch256_no_mlock", False, 256, 256),
+        ("batch128_mlock", True, 128, 128),
     ]
     results: list[dict[str, object]] = []
 
