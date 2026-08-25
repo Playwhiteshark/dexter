@@ -13,6 +13,10 @@ can override the first window for live diagnostics, while
 ``DEXTER_TTS_STEADY_STREAM_FRAMES`` overrides the steady-state size. Setting
 both to 50 produces uniform 50-frame / 1.0-second windows.
 
+``DEXTER_TTS_BACKEND_SAMPLING=1`` is an opt-in experiment that asks llama.cpp
+to run the same sampling chain on the model backend. Production keeps this off
+until the Vulkan path has been validated under concurrent LLM load.
+
 This module mirrors the pinned NeuTTS 1.4.1 private streaming method. Keep the
 NeuTTS dependency pinned while this integration exists and revalidate the
 pipeline before upgrading NeuTTS.
@@ -44,6 +48,53 @@ class _ProducerError:
 
 
 _SENTINEL = object()
+_BACKEND_SAMPLER_ATTR = "_dexter_backend_sampler"
+
+
+def _backend_sampling_requested() -> bool:
+    return os.environ.get("DEXTER_TTS_BACKEND_SAMPLING", "0").strip() == "1"
+
+
+def _attach_backend_sampler(tts) -> None:
+    """Attach a llama.cpp backend sampler matching NeuTTS's generation settings."""
+    if not _backend_sampling_requested():
+        return
+
+    import llama_cpp
+
+    backbone = tts.backbone
+    if not hasattr(backbone, "_init_sampler") or not hasattr(backbone, "ctx"):
+        raise RuntimeError(
+            "Dexter backend sampling requires llama-cpp-python's Llama sampler API"
+        )
+
+    # NeuTTS/Dexter currently call the backbone with temperature=1.0 and top_k=50.
+    # Leaving the other arguments at llama-cpp-python defaults mirrors the same
+    # high-level sampler chain used by Llama.__call__ for this request.
+    sampler = backbone._init_sampler(
+        top_k=50,
+        temp=1.0,
+    )
+
+    try:
+        active = bool(llama_cpp.llama_set_sampler(backbone.ctx, 0, sampler.sampler))
+    except Exception:
+        sampler.close()
+        raise
+
+    if not active:
+        sampler.close()
+        raise RuntimeError(
+            "llama.cpp rejected Dexter backend sampling for the active Vulkan context"
+        )
+
+    setattr(tts, _BACKEND_SAMPLER_ATTR, sampler)
+
+
+def _reset_backend_sampler(tts) -> None:
+    sampler = getattr(tts, _BACKEND_SAMPLER_ATTR, None)
+    if sampler is not None:
+        sampler.reset()
 
 
 def _frame_weight(frame: np.ndarray) -> np.ndarray:
@@ -156,6 +207,7 @@ def _pipelined_infer_stream_ggml(
         raise RuntimeError("Dexter's pipelined NeuTTS path requires Perth watermarking")
 
     prompt = self._ggml_prompt(ref_codes, ref_text, input_text, emotion)
+    _reset_backend_sampler(self)
     self.backbone.reset()
 
     first_frames = _first_stream_frames(int(self.streaming_frames_per_chunk))
@@ -308,5 +360,18 @@ def _pipelined_infer_stream_ggml(
 
 
 def install() -> None:
-    """Install the validated pipeline into the pinned NeuTTS base class."""
+    """Install Dexter's validated pipeline and optional backend-sampling probe."""
+    if _backend_sampling_requested():
+        original_load_backbone = neutts_core.NeuTTS._load_backbone
+
+        def load_backbone_with_backend_sampling(self, backbone_repo, backbone_device):
+            original_load_backbone(self, backbone_repo, backbone_device)
+            if str(backbone_device).strip().lower() == "cpu":
+                raise RuntimeError(
+                    "DEXTER_TTS_BACKEND_SAMPLING requires the GPU/Vulkan backbone"
+                )
+            _attach_backend_sampler(self)
+
+        neutts_core.NeuTTS._load_backbone = load_backbone_with_backend_sampling
+
     neutts_core.NeuTTS._infer_stream_ggml = _pipelined_infer_stream_ggml
