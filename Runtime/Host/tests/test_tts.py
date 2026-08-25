@@ -150,10 +150,13 @@ class VoiceOutputTests(unittest.TestCase):
         output.start()
         try:
             output.begin_response()
-            output.add_text("First sentence.")
+            # SpeechTextBuffer only emits a streamed sentence once terminal
+            # punctuation is followed by whitespace. Mirror the real token
+            # stream here so the first request actually becomes available.
+            output.add_text("First sentence. ")
             self.assertTrue(backend.first_started.wait(1.0))
 
-            output.add_text("Second sentence. Third sentence.")
+            output.add_text("Second sentence. Third sentence. ")
             backend.release_first.set()
 
             deadline = time.monotonic() + 1.0
