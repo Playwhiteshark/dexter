@@ -30,6 +30,7 @@ class NeuTTS2EBackend:
         self._request_lock = threading.Lock()
         self._write_lock = threading.Lock()
         self.ready_info: dict[str, object] | None = None
+        self.last_synthesis_stats: dict[str, object] | None = None
 
     @staticmethod
     def runtime_python() -> Path:
@@ -107,6 +108,7 @@ class NeuTTS2EBackend:
                 raise RuntimeError(f"NeuTTS-2E failed to start: {message.get('message')}")
             raise RuntimeError(f"Unexpected NeuTTS-2E startup message: {message}")
         self.ready_info = message
+        self.last_synthesis_stats = None
 
     def synthesize(
         self,
@@ -120,6 +122,7 @@ class NeuTTS2EBackend:
         with self._request_lock:
             self._request_id += 1
             request_id = self._request_id
+            self.last_synthesis_stats = None
             self._send({"cmd": "synthesize", "id": request_id, "text": text})
 
             finished = threading.Event()
@@ -161,6 +164,9 @@ class NeuTTS2EBackend:
                             sample_rate=int(message["sample_rate"]),
                         )
                     elif kind == "done":
+                        # Keep the worker's optional stage profile available to
+                        # diagnostics without changing the SpeechBackend API.
+                        self.last_synthesis_stats = dict(message)
                         return
                     elif kind in {"error", "fatal"}:
                         raise RuntimeError(
@@ -175,6 +181,7 @@ class NeuTTS2EBackend:
         process = self._process
         self._process = None
         self.ready_info = None
+        self.last_synthesis_stats = None
         if process is None:
             return
 
