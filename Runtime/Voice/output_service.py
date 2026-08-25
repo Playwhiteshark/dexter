@@ -12,6 +12,7 @@ from collections.abc import Callable
 
 from Runtime.Voice.buffered_audio_sink import BufferedSoundDeviceAudioSink
 from Runtime.Voice.neutts2e_backend import NeuTTS2EBackend
+from Runtime.Voice.text_normalization import NormalizingSpeechBackend
 from Runtime.Voice.tts import VoiceOutput, VoiceOutputState
 from Runtime.Voice.tts_trace import (
     TracingBufferedSoundDeviceAudioSink,
@@ -38,13 +39,17 @@ class SpeechOutputService:
         if output is not None:
             self.output = output
         elif tts_trace_enabled():
+            # Put normalization outside the tracing backend so synthesis traces
+            # show the exact text NeuTTS receives rather than the visible source.
             self.output = TracingVoiceOutput(
-                TracingSpeechBackend(NeuTTS2EBackend()),
+                NormalizingSpeechBackend(
+                    TracingSpeechBackend(NeuTTS2EBackend())
+                ),
                 sink=TracingBufferedSoundDeviceAudioSink(**sink_kwargs),
             )
         else:
             self.output = VoiceOutput(
-                NeuTTS2EBackend(),
+                NormalizingSpeechBackend(NeuTTS2EBackend()),
                 sink=BufferedSoundDeviceAudioSink(**sink_kwargs),
             )
         self._lock = threading.Lock()
