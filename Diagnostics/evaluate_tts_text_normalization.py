@@ -3,7 +3,7 @@ r"""Evaluate a lightweight text-normalization frontend before production wiring.
 Live Dexter is unchanged. Utterwise comes from the evaluation-only uv group;
 Dexter contributes only conservative cleanup for single-underscore emphasis,
 snake_case, word-style hyphens, punctuation-preserving rendering, and a tiny
-application pronunciation-override map.
+application pronunciation-override layer.
 
 Text-only:
     uv run --group tts-normalization-eval python Diagnostics\evaluate_tts_text_normalization.py
@@ -58,7 +58,8 @@ CASES = [
 ]
 
 AUDIO_TEXT = (
-    "AI and JSON are running in real-time; SQL is ready too. "
+    "AI is running locally, and JSON is valid. "
+    "The AI system is ready; SQL is ready too. "
     "The GPU reads snake_case and _important_ text. "
     "Python 3.13 is using 81% of the CPU, which is fairly high."
 )
@@ -72,16 +73,12 @@ _IDENTIFIER_UNDERSCORE_RE = re.compile(r"(?<=[A-Za-z])_(?=[A-Za-z])")
 _WORD_HYPHEN_RE = re.compile(
     r"(?<=[A-Za-z])-(?=[A-Za-z0-9])|(?<=[A-Za-z0-9])-(?=[A-Za-z])"
 )
+_AI_RE = re.compile(r"\bAI\b")
 
-# Keep overrides extremely small. Utterwise's generic spaced-letter rendering
-# is useful for technical initialisms such as SQL/CPU/GPU. The exceptions below
-# are cases where NeuTTS itself has demonstrated ambiguity or where the desired
-# spoken form is intentionally word-like.
+# Keep overrides extremely small. Generic technical initialisms remain
+# Utterwise's job. JSON is intentionally word-like; AI has a measured
+# context-sensitive spelling handled separately below.
 PRONUNCIATION_OVERRIDES = {
-    # A bare "A" can be read as the English article ("uh") rather than the
-    # letter name, so spell AI with unambiguous ordinary words.
-    "AI": "ay eye",
-    # User preference and common technical pronunciation.
     "JSON": "jay son",
 }
 
@@ -119,11 +116,32 @@ def dexter_preclean(text: str) -> str:
     return _WHITESPACE_RE.sub(" ", value).strip()
 
 
+def _format_ai_for_neutts(text: str) -> str:
+    """Render AI using the forms that were reliable in Paul listening tests.
+
+    A 12-sample matrix showed that ``A. I.`` was reliable at sentence start,
+    while plain ``A I`` was reliable inside a sentence. Using dotted letters
+    mid-sentence can create a false sentence pause after A, so choose the form
+    from the preceding sentence punctuation instead of using one spelling
+    everywhere.
+    """
+    parts: list[str] = []
+    cursor = 0
+    for match in _AI_RE.finditer(text):
+        parts.append(text[cursor : match.start()])
+        prefix = text[: match.start()].rstrip()
+        at_sentence_start = not prefix or prefix[-1] in ".!?"
+        parts.append("A. I." if at_sentence_start else "A I")
+        cursor = match.end()
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
 def apply_pronunciation_overrides(text: str) -> str:
     value = text
     for written, spoken in PRONUNCIATION_OVERRIDES.items():
         value = re.sub(rf"\b{re.escape(written)}\b", spoken, value)
-    return value
+    return _format_ai_for_neutts(value)
 
 
 def load_utterwise():
@@ -189,7 +207,8 @@ def distribution_size_bytes() -> int:
 
 
 def critical_checks(outputs: dict[str, str]) -> list[tuple[str, bool, str]]:
-    ai = outputs["AI is running locally."]
+    ai_initial = outputs["AI is running locally."]
+    ai_mid = outputs["NASA uses AI."]
     json_text = outputs["JSON output is valid."]
     technical = outputs["The CPU and GPU are busy."]
     markup = outputs["_important_ text should sound normal."]
@@ -200,7 +219,8 @@ def critical_checks(outputs: dict[str, str]) -> list[tuple[str, bool, str]]:
     punctuation = outputs["Wait; AI is ready, right? Yes: it is."]
     negative = outputs["It is -3°C; that's cold."]
     return [
-        ("AI uses unambiguous letter names", "ay eye" in ai.lower(), ai),
+        ("sentence-initial AI uses dotted letters", "A. I." in ai_initial, ai_initial),
+        ("mid-sentence AI uses spaced letters", "A I" in ai_mid and "A. I." not in ai_mid, ai_mid),
         ("JSON uses preferred pronunciation", "jay son" in json_text.lower(), json_text),
         (
             "CPU/GPU are expanded",
