@@ -1,9 +1,9 @@
-"""Diagnostic worker for measuring NeuTTS streaming frame sizes.
+"""Diagnostic worker for measuring uniform NeuTTS streaming window sizes.
 
-This wrapper changes only NeuTTS's streaming frame count and matching overlap-add
-stride before warmup. Production remains at the upstream 25-frame default.
-Arc offload, the production pipelined Perth path, voice, codec, seed and text all
-remain unchanged.
+This wrapper changes NeuTTS's first streaming frame count and forces Dexter's
+steady-state window override to the same value. Production uses a smaller first
+window followed by a larger steady-state window; these diagnostics deliberately
+remain uniform so 25 / 40 / 50 comparisons still mean exactly what they say.
 """
 
 from __future__ import annotations
@@ -22,8 +22,12 @@ try:
     STREAM_FRAMES = int(frames_raw)
 except ValueError as exc:
     raise SystemExit("DEXTER_TTS_DIAGNOSTIC_STREAM_FRAMES must be an integer") from exc
-if STREAM_FRAMES < 10 or STREAM_FRAMES > 60:
-    raise SystemExit("Diagnostic stream frames must be between 10 and 60")
+if STREAM_FRAMES < 10 or STREAM_FRAMES > 100:
+    raise SystemExit("Diagnostic stream frames must be between 10 and 100")
+
+# The production pipeline defaults to a 25-frame first decode and 50-frame
+# steady-state decodes. Uniform-window benchmarks explicitly pin both values.
+os.environ["DEXTER_TTS_STEADY_STREAM_FRAMES"] = str(STREAM_FRAMES)
 
 import neutts.neutts as neutts_core
 
