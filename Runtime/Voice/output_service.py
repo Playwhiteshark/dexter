@@ -14,7 +14,7 @@ from collections.abc import Callable
 from Runtime.Voice.neutts2e_backend import NeuTTS2EBackend
 from Runtime.Voice.text_normalization import NormalizingSpeechBackend
 from Runtime.Voice.tts import VoiceOutput, VoiceOutputState
-from Runtime.Voice.wasapi_audio_sink import WasapiDefaultAudioSink
+from Runtime.Voice.windows_default_audio_sink import WindowsDefaultAudioSink
 from Runtime.Voice.tts_trace import (
     TracingSpeechBackend,
     TracingVoiceOutput,
@@ -40,7 +40,7 @@ def _production_output() -> VoiceOutput:
     # TTS playback uses Core Audio/WASAPI directly so Dexter follows the live
     # Windows default render endpoint when headphones/speakers are plugged or
     # unplugged. STT remains on sounddevice/PortAudio and is not reinitialized.
-    sink = WasapiDefaultAudioSink(
+    sink = WindowsDefaultAudioSink(
         expected_sample_rate=_NEUTTS_SAMPLE_RATE,
         expected_channels=_NEUTTS_CHANNELS,
     )
