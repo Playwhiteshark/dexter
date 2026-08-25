@@ -8,6 +8,7 @@ installed and Ollama is unaffected.
 
 from __future__ import annotations
 
+import fnmatch
 import os
 import runpy
 import sys
@@ -128,6 +129,77 @@ def main() -> int:
         return original_init(self, *args, **kwargs)
 
     llama_cpp.Llama.__init__ = tuned_init
+
+    # llama-cpp-python's Llama.from_pretrained() always lists the remote
+    # Hugging Face repository before it asks hf_hub_download() for the cached
+    # model path. That makes an otherwise fully local Dexter startup fail during
+    # transient HF/TLS outages even when the GGUF is already on disk. Prefer the
+    # existing HF snapshot without network I/O, then retain upstream behavior as
+    # a cache-miss fallback so first-time setup still downloads normally.
+    original_from_pretrained = llama_cpp.Llama.from_pretrained
+
+    def local_first_from_pretrained(
+        cls,
+        repo_id,
+        filename,
+        additional_files=None,
+        local_dir=None,
+        local_dir_use_symlinks="auto",
+        cache_dir=None,
+        **kwargs,
+    ):
+        if local_dir is None and filename:
+            try:
+                from huggingface_hub import snapshot_download
+
+                snapshot = Path(
+                    snapshot_download(
+                        repo_id=repo_id,
+                        allow_patterns=[filename],
+                        cache_dir=cache_dir,
+                        local_files_only=True,
+                    )
+                )
+                matches = [
+                    path
+                    for path in snapshot.rglob("*")
+                    if path.is_file()
+                    and fnmatch.fnmatch(
+                        path.relative_to(snapshot).as_posix(),
+                        filename,
+                    )
+                ]
+                if len(matches) == 1:
+                    print(
+                        f"[TTS] llama.cpp backbone source=local-cache ({matches[0].name})",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    return cls(model_path=str(matches[0]), **kwargs)
+                if len(matches) > 1:
+                    print(
+                        f"[TTS] Local HF cache has multiple matches for {repo_id}/{filename}; falling back to upstream resolver",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            except Exception as exc:
+                print(
+                    f"[TTS] No usable local GGUF cache entry for {repo_id}: {exc}; falling back to Hugging Face",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+        return original_from_pretrained(
+            repo_id=repo_id,
+            filename=filename,
+            additional_files=additional_files,
+            local_dir=local_dir,
+            local_dir_use_symlinks=local_dir_use_symlinks,
+            cache_dir=cache_dir,
+            **kwargs,
+        )
+
+    llama_cpp.Llama.from_pretrained = classmethod(local_first_from_pretrained)
     print(
         f"[TTS] llama.cpp backbone batch={batch}, ubatch={ubatch}, mlock=upstream-default",
         file=sys.stderr,
