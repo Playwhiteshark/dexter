@@ -23,24 +23,29 @@ from Runtime.Voice.tts_trace import (
 ErrorCallback = Callable[[str], None]
 ReadyCallback = Callable[[dict[str, object] | None], None]
 
+_NEUTTS_SAMPLE_RATE = 24_000
+_NEUTTS_CHANNELS = 1
+
 
 class SpeechOutputService:
     """Own one VoiceOutput instance without exposing model lifecycle to Qt."""
 
     def __init__(self, output: VoiceOutput | None = None) -> None:
+        sink_kwargs = {
+            "expected_sample_rate": _NEUTTS_SAMPLE_RATE,
+            "expected_channels": _NEUTTS_CHANNELS,
+        }
         if output is not None:
             self.output = output
         elif tts_trace_enabled():
             self.output = TracingVoiceOutput(
                 TracingSpeechBackend(NeuTTS2EBackend()),
-                sink=TracingBufferedSoundDeviceAudioSink(),
+                sink=TracingBufferedSoundDeviceAudioSink(**sink_kwargs),
             )
         else:
-            # Keep the normal production path byte-for-byte equivalent when
-            # tracing is disabled; diagnostics must not perturb live behavior.
             self.output = VoiceOutput(
                 NeuTTS2EBackend(),
-                sink=BufferedSoundDeviceAudioSink(),
+                sink=BufferedSoundDeviceAudioSink(**sink_kwargs),
             )
         self._lock = threading.Lock()
         self._ready = False
