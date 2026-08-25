@@ -11,7 +11,7 @@ from collections.abc import Callable
 
 from PySide6.QtCore import QObject, Qt
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QFrame, QMenu, QToolButton, QWidget
+from PySide6.QtWidgets import QFrame, QLabel, QMenu, QToolButton, QWidget
 
 VoiceToggleCallback = Callable[[bool], None]
 
@@ -45,6 +45,33 @@ class VoiceOutputControl(QObject):
         )
         self.voice_action.toggled.connect(self._requested)
         self.menu.addAction(self.voice_action)
+
+        self.voice_status = QLabel(header)
+        self.voice_status.setObjectName("voiceStatus")
+        self.voice_status.setAccessibleName("Dexter Voice status")
+        self.voice_status.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+            True,
+        )
+        self.voice_status.setStyleSheet(
+            """
+            QLabel#voiceStatus {
+                color: rgba(255, 255, 255, 115);
+                font-size: 10px;
+                padding: 0px 2px;
+            }
+            QLabel#voiceStatus[state="ready"] {
+                color: rgba(190, 224, 194, 175);
+            }
+            QLabel#voiceStatus[state="starting"],
+            QLabel#voiceStatus[state="stopping"] {
+                color: rgba(255, 226, 165, 175);
+            }
+            QLabel#voiceStatus[state="error"] {
+                color: rgba(255, 176, 176, 205);
+            }
+            """
+        )
 
         self.more_button = QToolButton(header)
         self.more_button.setObjectName("moreButton")
@@ -83,14 +110,16 @@ class VoiceOutputControl(QObject):
             """
         )
 
-        # Keep the expensive resource toggle secondary: status -> overflow ->
-        # ordinary Clear/minimize commands. It therefore takes two deliberate
-        # clicks to unload Voice instead of one easy-to-hit speaker button.
+        # Keep the expensive resource toggle secondary: status -> Voice state ->
+        # overflow -> ordinary Clear/minimize commands. The label makes warm-up
+        # visible without turning the resource toggle itself into a primary action.
         clear_button = overlay.findChild(QToolButton, "clearButton")
         insert_at = layout.indexOf(clear_button) if clear_button is not None else -1
         if insert_at >= 0:
-            layout.insertWidget(insert_at, self.more_button)
+            layout.insertWidget(insert_at, self.voice_status)
+            layout.insertWidget(insert_at + 1, self.more_button)
         else:
+            layout.addWidget(self.voice_status)
             layout.addWidget(self.more_button)
 
         self.set_state("starting" if enabled else "off")
@@ -102,6 +131,25 @@ class VoiceOutputControl(QObject):
         """Reflect lifecycle state without re-triggering the toggle callback."""
         if state not in {"ready", "starting", "off", "stopping", "error"}:
             raise ValueError(f"unknown Voice-output state: {state}")
+
+        self.voice_status.setProperty("state", state)
+        if state == "ready":
+            self.voice_status.setText("Voice ready")
+            self.voice_status.setToolTip("Dexter Voice output is ready")
+        elif state == "starting":
+            self.voice_status.setText("Voice loading…")
+            self.voice_status.setToolTip("Dexter Voice output is warming up")
+        elif state == "stopping":
+            self.voice_status.setText("Voice unloading…")
+            self.voice_status.setToolTip("Dexter Voice output is releasing resources")
+        elif state == "error":
+            self.voice_status.setText("Voice error")
+            self.voice_status.setToolTip("Dexter Voice output failed to start")
+        else:
+            self.voice_status.setText("Voice off")
+            self.voice_status.setToolTip("Dexter Voice output is disabled")
+        self.voice_status.style().unpolish(self.voice_status)
+        self.voice_status.style().polish(self.voice_status)
 
         previous = self.voice_action.blockSignals(True)
         try:
