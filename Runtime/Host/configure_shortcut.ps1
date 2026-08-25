@@ -7,10 +7,18 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $pythonw = Join-Path $repoRoot ".venv\Scripts\pythonw.exe"
+$launcher = Join-Path $PSScriptRoot "launch_hidden.vbs"
+$wscript = Join-Path $env:WINDIR "System32\wscript.exe"
 $iconPath = Join-Path $PSScriptRoot "assets\dexter.ico"
 
 if (-not (Test-Path -LiteralPath $pythonw -PathType Leaf)) {
     throw "Dexter's root virtual environment is missing. Run 'uv sync' from '$repoRoot' first."
+}
+if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
+    throw "Dexter's hidden launcher is missing: '$launcher'."
+}
+if (-not (Test-Path -LiteralPath $wscript -PathType Leaf)) {
+    throw "Windows Script Host was not found at '$wscript'."
 }
 
 $shortcutDirectory = Split-Path -Parent $ShortcutPath
@@ -21,14 +29,15 @@ if ($shortcutDirectory -and -not (Test-Path -LiteralPath $shortcutDirectory)) {
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($ShortcutPath)
 
-# The interactive/dev command is `uv run python -m Runtime.Host.app`, but a
-# persistent Windows shortcut can call the already-synced root environment
-# directly. This avoids an extra uv process on every normal Dexter launch while
-# guaranteeing that Host, STT and TTS use the project's pinned Python/runtime.
-$shortcut.TargetPath = $pythonw
-$shortcut.Arguments = "-m Runtime.Host.app"
+# Use Windows Script Host as the GUI-subsystem bootstrap, then launch the root
+# pythonw.exe invisibly from launch_hidden.vbs. This keeps normal Dexter startup
+# console-free even if Windows would otherwise allocate a terminal for a console
+# subsystem executable somewhere in the launch chain.
+$shortcut.TargetPath = $wscript
+$shortcut.Arguments = "//nologo `"$launcher`""
 $shortcut.WorkingDirectory = $repoRoot
 $shortcut.Description = "Dexter local assistant"
+$shortcut.WindowStyle = 7
 
 if (Test-Path -LiteralPath $iconPath -PathType Leaf) {
     $shortcut.IconLocation = "$iconPath,0"
@@ -36,5 +45,5 @@ if (Test-Path -LiteralPath $iconPath -PathType Leaf) {
 
 $shortcut.Save()
 Write-Host "Dexter shortcut configured: $ShortcutPath"
-Write-Host "Target: $pythonw -m Runtime.Host.app"
+Write-Host "Target: $wscript //nologo `"$launcher`""
 Write-Host "Start in: $repoRoot"
