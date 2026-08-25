@@ -71,7 +71,6 @@ class SpeechOutputService:
 
         if output_factory is not None:
             self._output_factory = output_factory
-            self.output: VoiceOutput | None = None
         elif output is not None:
             # Existing unit-test/injection path. A supplied instance is one-shot;
             # callers that need disable -> re-enable should supply a factory.
@@ -88,11 +87,11 @@ class SpeechOutputService:
                 return supplied
 
             self._output_factory = one_shot_factory
-            self.output = None
         else:
             self._output_factory = _production_output
-            self.output = None
 
+        self.output: VoiceOutput | None = None
+        self._stopping_output: VoiceOutput | None = None
         self._lock = threading.Lock()
         self._state = _OFF
         self._ready = False
@@ -141,11 +140,7 @@ class SpeechOutputService:
                 output = self._output_factory()
             except Exception as exc:
                 self._startup_error = str(exc)
-                if on_error is not None:
-                    # Keep callbacks out of the service lock.
-                    callback_error = self._startup_error
-                else:
-                    callback_error = None
+                callback_error = self._startup_error if on_error is not None else None
                 output = None
             else:
                 callback_error = None
@@ -213,7 +208,7 @@ class SpeechOutputService:
                 self._state = _READY
                 self._startup_thread = None
 
-        # If disable() invalidated this warm-up, its shutdown worker owns final
+        # If disable invalidated this warm-up, its shutdown worker owns final
         # cleanup. Do not resurrect readiness or emit a stale ready callback.
         if not current:
             return
@@ -246,6 +241,7 @@ class SpeechOutputService:
                 self._state = _STOPPING
                 output = self.output
                 self.output = None
+                self._stopping_output = output
                 startup_thread = self._startup_thread
                 self._startup_thread = None
                 thread = threading.Thread(
@@ -274,14 +270,15 @@ class SpeechOutputService:
         if output is not None:
             self._safe_stop(output)
 
-        # Stopping the backend interrupts its blocking startup read. Wait for the
-        # retired startup thread to leave before declaring resources fully off.
+        # Stopping the backend interrupts its blocking startup read. Because this
+        # runs away from Qt, wait until that retired thread really exits before
+        # exposing OFF/re-enable; a fresh worker must never overlap an old one.
         if (
             startup_thread is not None
             and startup_thread.is_alive()
             and startup_thread is not threading.current_thread()
         ):
-            startup_thread.join(timeout=8.0)
+            startup_thread.join()
 
         # A late start/stop race can leave VoiceOutput in ERROR after the first
         # stop killed the child. A second best-effort stop closes any sink/thread
@@ -295,6 +292,7 @@ class SpeechOutputService:
                 self._state = _OFF
                 self._ready = False
                 self._response_active = False
+                self._stopping_output = None
                 self._shutdown_thread = None
 
         if current and on_disabled is not None:
@@ -360,15 +358,20 @@ class SpeechOutputService:
             self._state = _SHUTDOWN
             self._ready = False
             self._response_active = False
-            output = self.output
+            active_output = self.output
+            stopping_output = self._stopping_output
             self.output = None
+            self._stopping_output = None
             startup_thread = self._startup_thread
             shutdown_thread = self._shutdown_thread
             self._startup_thread = None
             self._shutdown_thread = None
 
-        if output is not None:
-            self._safe_stop(output)
+        outputs = []
+        for candidate in (active_output, stopping_output):
+            if candidate is not None and all(candidate is not item for item in outputs):
+                outputs.append(candidate)
+                self._safe_stop(candidate)
 
         for thread in (startup_thread, shutdown_thread):
             if (
@@ -378,7 +381,7 @@ class SpeechOutputService:
             ):
                 thread.join(timeout=3.0)
 
-        if output is not None:
+        for output in outputs:
             self._safe_stop(output)
 
     @staticmethod
