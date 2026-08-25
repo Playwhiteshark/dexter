@@ -14,6 +14,14 @@ block SciPy's unsigned native extensions. During Perth's import only, Dexter
 provides fail-loud placeholders for those two unused names, then removes the
 placeholder modules immediately so they cannot shadow a later legitimate SciPy
 import elsewhere in the process.
+
+This class is inference-only, so watermark application runs under
+``torch.inference_mode()``. Perth's upstream inference path leaves autograd
+enabled even after ``eval()``, causing Torch to retain roughly 30--40 MB of
+native memory per spoken response in Dexter's streaming workload. Target-machine
+A/B testing over 64 identical watermark calls reduced growth from about 245 MB
+working set / 258 MB private commit to about 0.3 MB / 0.3 MB, while producing
+byte-identical output.
 """
 
 from __future__ import annotations
@@ -127,7 +135,8 @@ class PerthEncoderOnlyWatermarker:
         self.encoder.load_state_dict(encoder_state, strict=True)
 
         # Match stock inference behavior. The current encoder has no dropout or
-        # batch-norm, but eval() makes the intent explicit and future-safe.
+        # batch-norm, but eval() makes layer behavior explicit. inference_mode()
+        # on apply_watermark additionally disables autograd/native graph state.
         self.encoder.eval()
         self.ap.eval()
 
@@ -144,6 +153,7 @@ class PerthEncoderOnlyWatermarker:
             value = torch.from_numpy(value.copy())
         return value.to(dtype=torch.float, device=device)
 
+    @torch.inference_mode()
     def apply_watermark(self, signal: np.ndarray | torch.Tensor, sample_rate: int, **_: Any):
         change_rate = sample_rate != self.hp.sample_rate
         if change_rate:
