@@ -1,6 +1,0 @@
-.runtime/
-results/
-reference.wav
-reference.txt
-__pycache__/
-*.py[cod]
