@@ -1,9 +1,9 @@
 """Launch Dexter's NeuTTS worker with validated production tuning.
 
 This wrapper exists only around the isolated TTS child process. It applies the
-validated llama-cpp-python batch settings and, by default, installs Dexter's
-minimal ONNX-only NeuCodec compatibility surface before NeuTTS is imported.
-No global/site-wide monkey patches are installed and Ollama is unaffected.
+validated llama-cpp-python batch settings and installs Dexter's validated lean
+compatibility paths before NeuTTS is imported. No system-wide monkey patches are
+installed and Ollama is unaffected.
 """
 
 from __future__ import annotations
@@ -42,13 +42,11 @@ def main() -> int:
     batch = _positive_int("DEXTER_TTS_BACKBONE_BATCH", 128)
     ubatch = _positive_int("DEXTER_TTS_BACKBONE_UBATCH", batch)
 
-    # NeuTTS imports the full neucodec PyTorch/Transformers implementation even
-    # when only the precompiled ONNX decoder is selected. Dexter's compatibility
-    # module exposes the exact ONNX decoder API NeuTTS needs and deliberately
-    # rejects the unused PyTorch codec paths. Repeated sustained-Gemma A/B tests
-    # found effectively unchanged TTS performance (median RTF 0.777 vs 0.772,
-    # TTFA 1.089 s vs 1.114 s) while saving ~52.5 MB working set / 48.1 MB
-    # private memory. Keep an explicit fallback for diagnostics.
+    # NeuTTS imports the full neucodec PyTorch implementation even when only the
+    # precompiled ONNX decoder is selected. Dexter's compatibility module exposes
+    # the ONNX decoder API NeuTTS needs and deliberately rejects unused PyTorch
+    # codec paths. Repeated sustained-Gemma A/B tests found effectively unchanged
+    # performance while saving ~52.5 MB working set / 48.1 MB private memory.
     lean_neucodec = _binary_flag("DEXTER_TTS_LEAN_NEUCODEC", True)
     if lean_neucodec:
         from neucodec_onnx_compat import install_as_neucodec
@@ -62,6 +60,32 @@ def main() -> int:
     else:
         print(
             "[TTS] NeuCodec ONNX path=upstream",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    # Perth's apply_watermark() uses only the watermark encoder, but upstream
+    # Perth also constructs a three-branch detector network used for watermark
+    # detection/training. Dexter never performs detection in its speech worker.
+    # The encoder-only path loads the exact same encoder weights and applies the
+    # same watermark algorithm. Target-machine A/B saved ~29.1 MB working set /
+    # 32.1 MB private and produced byte-identical PCM. Repeated full-pipeline
+    # sustained-Gemma medians were also non-regressive (RTF 0.806 vs 0.833,
+    # TTFA 1.116 s vs 1.155 s). Keep an upstream fallback for diagnostics.
+    encoder_only_perth = _binary_flag("DEXTER_TTS_PERTH_ENCODER_ONLY", True)
+    if encoder_only_perth:
+        from perth_encoder_only import PerthEncoderOnlyWatermarker
+        import perth
+
+        perth.PerthImplicitWatermarker = PerthEncoderOnlyWatermarker
+        print(
+            "[TTS] Perth path=encoder-only",
+            file=sys.stderr,
+            flush=True,
+        )
+    else:
+        print(
+            "[TTS] Perth path=upstream",
             file=sys.stderr,
             flush=True,
         )
