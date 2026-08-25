@@ -1,28 +1,96 @@
-"""Encoder-only Perth compatibility path for Dexter experiments.
+"""Encoder-only Perth compatibility path for Dexter production TTS.
 
-Perth's production ``apply_watermark`` path uses only the watermark encoder and
-audio processor, but ``PerthNet`` also constructs a three-branch decoder used
-for detection/training. Dexter never calls watermark detection. This module
-loads the exact encoder weights from Perth's packaged checkpoint and mirrors
+Perth's ``apply_watermark`` path uses only the watermark encoder and audio
+processor, but ``PerthNet`` also constructs a three-branch decoder used for
+detection/training. Dexter never calls watermark detection. This module loads
+the exact encoder weights from Perth's packaged checkpoint and mirrors
 ``PerthImplicitWatermarker.apply_watermark`` while deliberately not exposing a
 working detector.
 
-This module is experimental until full output/performance A/B validation passes.
+The installed Perth package also imports ``scipy.signal.butter`` and
+``scipy.signal.filtfilt`` eagerly from a utility module even though watermark
+insertion never calls those filtering helpers. Windows Application Control can
+block SciPy's unsigned native extensions. During Perth's import only, Dexter
+provides fail-loud placeholders for those two unused names, then removes the
+placeholder modules immediately so they cannot shadow a later legitimate SciPy
+import elsewhere in the process.
 """
 
 from __future__ import annotations
 
+import sys
+import types
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 from librosa import resample
-from perth.perth_net import PREPACKAGED_MODELS_DIR
-from perth.perth_net.perth_net_implicit.audio_processor import AudioProcessor
-from perth.perth_net.perth_net_implicit.checkpoint_manager import CheckpointManager
-from perth.perth_net.perth_net_implicit.model import compute_subband_freq
-from perth.perth_net.perth_net_implicit.model.encoder import Encoder
+
+
+def _import_perth_encoder_dependencies():
+    """Import the narrow Perth encoder path without loading SciPy native code.
+
+    Perth's utility module imports ``butter``/``filtfilt`` at module import time,
+    but neither function participates in the STFT -> encoder -> inverse-STFT
+    watermark insertion path used by Dexter. Temporarily satisfy those imports
+    with functions that raise if unexpectedly called. Remove the temporary
+    modules after Perth has captured the names so this compatibility layer cannot
+    affect unrelated libraries later in the worker lifetime.
+    """
+
+    scipy_existing = sys.modules.get("scipy")
+    signal_existing = sys.modules.get("scipy.signal")
+    installed_stub = scipy_existing is None and signal_existing is None
+
+    scipy_stub = None
+    signal_stub = None
+    if installed_stub:
+        scipy_stub = types.ModuleType("scipy")
+        scipy_stub.__path__ = []  # mark as package for normal import semantics
+        signal_stub = types.ModuleType("scipy.signal")
+
+        def _unused_filter(*args: Any, **kwargs: Any):
+            raise RuntimeError(
+                "Dexter's encoder-only Perth path unexpectedly called a SciPy "
+                "Butterworth filtering helper; use upstream Perth/SciPy for that path"
+            )
+
+        signal_stub.butter = _unused_filter
+        signal_stub.filtfilt = _unused_filter
+        scipy_stub.signal = signal_stub
+        sys.modules["scipy"] = scipy_stub
+        sys.modules["scipy.signal"] = signal_stub
+
+    try:
+        from perth.perth_net import PREPACKAGED_MODELS_DIR
+        from perth.perth_net.perth_net_implicit.audio_processor import AudioProcessor
+        from perth.perth_net.perth_net_implicit.checkpoint_manager import CheckpointManager
+        from perth.perth_net.perth_net_implicit.model import compute_subband_freq
+        from perth.perth_net.perth_net_implicit.model.encoder import Encoder
+
+        return (
+            PREPACKAGED_MODELS_DIR,
+            AudioProcessor,
+            CheckpointManager,
+            compute_subband_freq,
+            Encoder,
+        )
+    finally:
+        if installed_stub:
+            if sys.modules.get("scipy.signal") is signal_stub:
+                sys.modules.pop("scipy.signal", None)
+            if sys.modules.get("scipy") is scipy_stub:
+                sys.modules.pop("scipy", None)
+
+
+(
+    PREPACKAGED_MODELS_DIR,
+    AudioProcessor,
+    CheckpointManager,
+    compute_subband_freq,
+    Encoder,
+) = _import_perth_encoder_dependencies()
 
 
 class PerthEncoderOnlyWatermarker:
