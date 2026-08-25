@@ -15,12 +15,7 @@ both to 50 produces uniform 50-frame / 1.0-second windows.
 
 ``DEXTER_TTS_BACKEND_SAMPLING=1`` is an opt-in experiment that asks llama.cpp
 to run the same sampling chain on the model backend. Production keeps this off
-because the Vulkan path did not improve concurrent synthesis on the target
-machine.
-
-``DEXTER_TTS_FLASH_ATTN=0`` is an opt-in Arc/Vulkan profiling override. NeuTTS
-1.4.1 normally forces Flash Attention on for GPU GGUF inference; leaving this
-environment variable unset preserves that upstream production behavior.
+until the Vulkan path has been validated under concurrent LLM load.
 
 This module mirrors the pinned NeuTTS 1.4.1 private streaming method. Keep the
 NeuTTS dependency pinned while this integration exists and revalidate the
@@ -60,19 +55,6 @@ def _backend_sampling_requested() -> bool:
     return os.environ.get("DEXTER_TTS_BACKEND_SAMPLING", "0").strip() == "1"
 
 
-def _flash_attention_override() -> bool | None:
-    raw = os.environ.get("DEXTER_TTS_FLASH_ATTN", "").strip().lower()
-    if not raw:
-        return None
-    if raw in {"1", "true", "on", "yes"}:
-        return True
-    if raw in {"0", "false", "off", "no"}:
-        return False
-    raise RuntimeError(
-        "DEXTER_TTS_FLASH_ATTN must be one of 1/0, true/false, on/off, yes/no"
-    )
-
-
 def _attach_backend_sampler(tts) -> None:
     """Attach a llama.cpp backend sampler matching NeuTTS's generation settings."""
     if not _backend_sampling_requested():
@@ -86,6 +68,9 @@ def _attach_backend_sampler(tts) -> None:
             "Dexter backend sampling requires llama-cpp-python's Llama sampler API"
         )
 
+    # NeuTTS/Dexter currently call the backbone with temperature=1.0 and top_k=50.
+    # Leaving the other arguments at llama-cpp-python defaults mirrors the same
+    # high-level sampler chain used by Llama.__call__ for this request.
     sampler = backbone._init_sampler(
         top_k=50,
         temp=1.0,
@@ -228,6 +213,8 @@ def _pipelined_infer_stream_ggml(
     first_frames = _first_stream_frames(int(self.streaming_frames_per_chunk))
     steady_frames = _steady_stream_frames(first_frames)
 
+    # Two pending windows are enough to keep Arc generation ahead without
+    # letting cancellation accumulate a large amount of useless work.
     jobs: queue.Queue[_DecodeJob | _ProducerError | object] = queue.Queue(maxsize=2)
     stop_event = threading.Event()
 
@@ -259,7 +246,10 @@ def _pipelined_infer_stream_ggml(
 
                 token_cache.append(item["choices"][0]["text"])
                 frames = first_frames if regular_windows == 0 else steady_frames
-                if len(token_cache) - n_decoded_tokens < frames + self.streaming_lookforward:
+                if (
+                    len(token_cache) - n_decoded_tokens
+                    < frames + self.streaming_lookforward
+                ):
                     continue
 
                 tokens_start = max(
@@ -344,6 +334,9 @@ def _pipelined_infer_stream_ggml(
                 raise value.error
             assert isinstance(value, _DecodeJob)
 
+            # Preserve NeuTTS 1.4.1's post-processing order exactly: decode the
+            # context window, watermark the reconstruction, crop the requested
+            # window, then overlap-add the already-watermarked windows.
             recon = self._decode("".join(value.codes))
             recon = self.watermarker.apply_watermark(recon, sample_rate=24_000)
             if value.sample_end is None:
@@ -366,48 +359,19 @@ def _pipelined_infer_stream_ggml(
         producer_thread.join(timeout=2.0)
 
 
-def _install_backbone_overrides() -> None:
-    flash_override = _flash_attention_override()
-    backend_sampling = _backend_sampling_requested()
-    if flash_override is None and not backend_sampling:
-        return
+def install() -> None:
+    """Install Dexter's validated pipeline and optional backend-sampling probe."""
+    if _backend_sampling_requested():
+        original_load_backbone = neutts_core.NeuTTS._load_backbone
 
-    original_load_backbone = neutts_core.NeuTTS._load_backbone
-
-    def load_backbone_with_overrides(self, backbone_repo, backbone_device):
-        device = str(backbone_device).strip().lower()
-
-        if flash_override is None:
+        def load_backbone_with_backend_sampling(self, backbone_repo, backbone_device):
             original_load_backbone(self, backbone_repo, backbone_device)
-        else:
-            if not str(backbone_repo).endswith("gguf"):
-                raise RuntimeError(
-                    "DEXTER_TTS_FLASH_ATTN currently supports only the GGUF backbone"
-                )
-            from llama_cpp import Llama
-
-            self.backbone = Llama.from_pretrained(
-                repo_id=backbone_repo,
-                filename="*.gguf",
-                verbose=False,
-                n_gpu_layers=-1 if device == "gpu" else 0,
-                n_ctx=self.max_context,
-                mlock=True,
-                flash_attn=flash_override if device == "gpu" else False,
-            )
-            self._is_quantized_model = True
-
-        if backend_sampling:
-            if device == "cpu":
+            if str(backbone_device).strip().lower() == "cpu":
                 raise RuntimeError(
                     "DEXTER_TTS_BACKEND_SAMPLING requires the GPU/Vulkan backbone"
                 )
             _attach_backend_sampler(self)
 
-    neutts_core.NeuTTS._load_backbone = load_backbone_with_overrides
+        neutts_core.NeuTTS._load_backbone = load_backbone_with_backend_sampling
 
-
-def install() -> None:
-    """Install Dexter's streaming pipeline and opt-in llama.cpp probes."""
-    _install_backbone_overrides()
     neutts_core.NeuTTS._infer_stream_ggml = _pipelined_infer_stream_ggml
