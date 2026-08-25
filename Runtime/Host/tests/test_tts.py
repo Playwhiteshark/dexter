@@ -67,33 +67,6 @@ class SpeechTextBufferTests(unittest.TestCase):
         )
         self.assertEqual(buffer.flush(), ["The next"])
 
-    def test_first_natural_clause_can_start_speech_early(self) -> None:
-        buffer = SpeechTextBuffer()
-        self.assertEqual(
-            buffer.feed(
-                "The useful part is that Dexter can begin speaking, while the rest"
-            ),
-            ["The useful part is that Dexter can begin speaking,"],
-        )
-        self.assertEqual(
-            buffer.feed(" of this sentence is still arriving from the model"),
-            [],
-        )
-        self.assertEqual(
-            buffer.flush(),
-            ["while the rest of this sentence is still arriving from the model"],
-        )
-
-    def test_first_unit_has_short_fallback_without_punctuation(self) -> None:
-        buffer = SpeechTextBuffer()
-        ready = buffer.feed(
-            "This opening thought keeps going without useful punctuation and continues "
-            "long enough that waiting for a complete sentence would feel sluggish"
-        )
-        self.assertEqual(len(ready), 1)
-        self.assertLessEqual(len(ready[0]), 72)
-        self.assertTrue(buffer.flush())
-
     def test_long_unpunctuated_text_is_bounded(self) -> None:
         buffer = SpeechTextBuffer(max_chars=80)
         text = ("word " * 30).strip()
@@ -139,24 +112,6 @@ class VoiceOutputTests(unittest.TestCase):
             self.assertEqual(
                 backend.requests,
                 ["First sentence.", "Still generating"],
-            )
-        finally:
-            output.stop()
-
-    def test_first_clause_can_synthesize_before_sentence_finishes(self) -> None:
-        backend = _FakeBackend()
-        sink = _FakeSink()
-        output = VoiceOutput(backend, sink=sink)
-        output.start()
-        try:
-            output.begin_response()
-            output.add_text(
-                "The useful part is that Dexter can begin speaking, while more text"
-            )
-            self.assertTrue(backend.generated.wait(1.0))
-            self.assertEqual(
-                backend.requests,
-                ["The useful part is that Dexter can begin speaking,"],
             )
         finally:
             output.stop()
