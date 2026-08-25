@@ -446,15 +446,52 @@ class VoiceOutput:
         with self._lock:
             if response_id != self._response_id or self._cancel_event.is_set():
                 return
-            cancel_event = self._cancel_event
 
+        unit = _SpeechUnit(response_id, spoken)
         try:
-            self._text_queue.put_nowait(_SpeechUnit(response_id, spoken))
+            self._text_queue.put_nowait(unit)
+            return
         except queue.Full:
-            # Never block Qt/Goose.  A full queue means speech has fallen far
-            # enough behind that reading every old sentence is no longer useful.
-            LOGGER.warning("TTS text queue full; dropping speech unit: %r", spoken[:80])
-            cancel_event.set()
+            pass
+
+        # Never block Qt/Goose. If synthesis falls behind far enough to fill the
+        # bounded queue, discard the oldest *pending* sentence and keep the
+        # newest speech. The sentence already being synthesized is untouched,
+        # and queue pressure must never cancel the rest of the assistant turn.
+        try:
+            dropped = self._text_queue.get_nowait()
+        except queue.Empty:
+            # The synthesis worker drained the queue between Full and get().
+            # Retry once without blocking; a concurrent refill can still win.
+            try:
+                self._text_queue.put_nowait(unit)
+            except queue.Full:
+                LOGGER.warning(
+                    "TTS text queue refilled concurrently; dropping newest speech unit: %r",
+                    spoken[:80],
+                )
+            return
+
+        if dropped is _STOP:
+            # Shutdown won the race. Preserve the stop sentinel and ignore new
+            # speech rather than allowing late response text to revive the queue.
+            self._text_queue.put_nowait(_STOP)
+            return
+
+        assert isinstance(dropped, _SpeechUnit)
+        LOGGER.warning(
+            "TTS text queue full; dropping oldest pending speech unit: %r",
+            dropped.text[:80],
+        )
+        try:
+            self._text_queue.put_nowait(unit)
+        except queue.Full:
+            # A producer/refill raced us after the drop. Stay non-blocking and
+            # preserve the bounded queue; importantly, do not cancel the turn.
+            LOGGER.warning(
+                "TTS text queue refilled concurrently; dropping newest speech unit: %r",
+                spoken[:80],
+            )
 
     def _coalesce_available_units(self, first: _SpeechUnit) -> _SpeechUnit:
         """Merge a few already-queued same-response sentences without waiting."""
