@@ -241,6 +241,8 @@ class WindowsDefaultAudioSink:
                                 current=speaker_name,
                             )
 
+                data: np.ndarray | None = None
+                generation: int | None = None
                 with self._condition:
                     while True:
                         if self._closed:
@@ -307,6 +309,12 @@ class WindowsDefaultAudioSink:
                     if self._closed:
                         break
 
+                # Waiting for initial prebuffer or rebuffer is a deliberate
+                # no-play iteration. Never reuse data/generation from a previous
+                # pass through the loop; doing so can replay stale PCM and consume
+                # newly buffered samples before the reserve target is reached.
+                if data is None or generation is None:
+                    continue
                 if not self._playing or self._buffered_frames <= 0:
                     continue
                 if player is None:
