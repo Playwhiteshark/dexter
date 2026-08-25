@@ -109,36 +109,6 @@ PROFILE_LLAMA_STAGES = (
 _PROTOCOL_OUT = sys.stdout
 
 
-def _apply_windows_priority() -> None:
-    """Protect latency-sensitive synthesis from concurrent LLM CPU work.
-
-    Live profiling on Dexter's target Windows machine showed that the default
-    process priority lets Ollama/llama-server starve the NeuTTS worker badly
-    enough to push synthesis from faster-than-realtime to ~1.7x realtime.
-    AboveNormal restored concurrent synthesis to roughly realtime without using
-    HIGH/REALTIME priority classes that could compromise system responsiveness.
-    """
-    if os.name != "nt":
-        return
-    try:
-        import ctypes
-
-        above_normal_priority_class = 0x00008000
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        process = kernel32.GetCurrentProcess()
-        if not kernel32.SetPriorityClass(process, above_normal_priority_class):
-            error = ctypes.get_last_error()
-            print(
-                f"[TTS] Warning: could not set AboveNormal process priority (error={error})",
-                file=sys.stderr,
-            )
-    except Exception as exc:
-        print(
-            f"[TTS] Warning: could not set AboveNormal process priority: {exc}",
-            file=sys.stderr,
-        )
-
-
 def _emit(payload: dict[str, Any]) -> None:
     _PROTOCOL_OUT.write(json.dumps(payload, separators=(",", ":")) + "\n")
     _PROTOCOL_OUT.flush()
@@ -178,8 +148,6 @@ def _command_reader(
 
 
 def main() -> int:
-    _apply_windows_priority()
-
     import numpy as np
     import llama_cpp
     import neutts.neutts as neutts_core
