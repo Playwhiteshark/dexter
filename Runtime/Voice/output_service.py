@@ -11,20 +11,14 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 
-from Runtime.Voice.buffered_audio_sink import BufferedSoundDeviceAudioSink
 from Runtime.Voice.neutts2e_backend import NeuTTS2EBackend
 from Runtime.Voice.text_normalization import NormalizingSpeechBackend
 from Runtime.Voice.tts import VoiceOutput, VoiceOutputState
+from Runtime.Voice.wasapi_audio_sink import WasapiDefaultAudioSink
 from Runtime.Voice.tts_trace import (
-    TracingBufferedSoundDeviceAudioSink,
     TracingSpeechBackend,
     TracingVoiceOutput,
     enabled as tts_trace_enabled,
-    event as tts_trace_event,
-)
-from Runtime.Voice.windows_default_audio_sink import (
-    WindowsDefaultAudioSink,
-    soundcard_available,
 )
 
 ErrorCallback = Callable[[str], None]
@@ -42,34 +36,19 @@ _STOPPING = "stopping"
 _SHUTDOWN = "shutdown"
 
 
-def _production_sink(**sink_kwargs):
-    # sounddevice/PortAudio caches the Windows default endpoint at process
-    # initialization. SoundCard talks to Core Audio/WASAPI directly, so asking
-    # for its default speaker follows headphone/speaker plug-unplug changes
-    # without reinitializing PortAudio and disturbing Moonshine's microphone.
-    if soundcard_available():
-        return WindowsDefaultAudioSink(
-            **sink_kwargs,
-            trace_callback=tts_trace_event if tts_trace_enabled() else None,
-        )
-    if tts_trace_enabled():
-        return TracingBufferedSoundDeviceAudioSink(**sink_kwargs)
-    return BufferedSoundDeviceAudioSink(**sink_kwargs)
-
-
 def _production_output() -> VoiceOutput:
-    sink_kwargs = {
-        "expected_sample_rate": _NEUTTS_SAMPLE_RATE,
-        "expected_channels": _NEUTTS_CHANNELS,
-    }
-    sink = _production_sink(**sink_kwargs)
+    # TTS playback uses Core Audio/WASAPI directly so Dexter follows the live
+    # Windows default render endpoint when headphones/speakers are plugged or
+    # unplugged. STT remains on sounddevice/PortAudio and is not reinitialized.
+    sink = WasapiDefaultAudioSink(
+        expected_sample_rate=_NEUTTS_SAMPLE_RATE,
+        expected_channels=_NEUTTS_CHANNELS,
+    )
     if tts_trace_enabled():
         # Put normalization outside the tracing backend so synthesis traces show
         # the exact text NeuTTS receives rather than the visible source.
         return TracingVoiceOutput(
-            NormalizingSpeechBackend(
-                TracingSpeechBackend(NeuTTS2EBackend())
-            ),
+            NormalizingSpeechBackend(TracingSpeechBackend(NeuTTS2EBackend())),
             sink=sink,
         )
     return VoiceOutput(
