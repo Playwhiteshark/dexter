@@ -7,12 +7,12 @@ Only llama.cpp n_batch/n_ubatch changes.
 
 Normal isolated test:
 
-    uv run python Diagnostics/tts_batch_perf_ab.py
+    uv run python Development/Archive/TTS/Experiments/tts_batch_perf_ab.py
 
 Final production-like concurrency check (Gemma generating via Ollama while TTS
 runs):
 
-    uv run python Diagnostics/tts_batch_perf_ab.py --concurrent
+    uv run python Development/Archive/TTS/Experiments/tts_batch_perf_ab.py --concurrent
 """
 
 from __future__ import annotations
