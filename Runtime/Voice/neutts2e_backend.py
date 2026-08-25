@@ -63,11 +63,11 @@ class NeuTTS2EBackend:
         )
 
         # Validated production path on the target machine:
-        # Q8 backbone -> Intel Arc 140T Vulkan0; ONNX codec + Perth -> CPU.
+        # Q4 backbone -> Intel Arc 140T Vulkan0; ONNX codec + Perth -> CPU.
         # GGUF generation and CPU post-processing are pipelined so Perth remains
         # enabled without forcing the two independent devices to run serially.
         # Preserve explicit developer overrides when troubleshooting.
-        env.setdefault("DEXTER_TTS_VARIANT", "q8")
+        env.setdefault("DEXTER_TTS_VARIANT", "q4")
         env.setdefault("DEXTER_TTS_BACKBONE_DEVICE", "gpu")
         env.setdefault("DEXTER_TTS_VULKAN_DEVICE", "0")
         env.setdefault("DEXTER_TTS_PIPELINE_WATERMARK", "1")
@@ -87,6 +87,14 @@ class NeuTTS2EBackend:
         if not WORKER_PATH.exists():
             raise RuntimeError(f"Missing NeuTTS-2E worker: {WORKER_PATH}")
 
+        # Start the latency-sensitive worker at AboveNormal directly. This is
+        # more reliable on Windows than changing priority from Python after
+        # process creation, and preserves the ~30-40% concurrent-generation win
+        # measured on the target machine. Never use HIGH/REALTIME here.
+        creationflags = (
+            subprocess.ABOVE_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0
+        )
+
         process = subprocess.Popen(
             [str(python), "-u", str(WORKER_PATH)],
             cwd=str(REPO_ROOT),
@@ -98,6 +106,7 @@ class NeuTTS2EBackend:
             errors="replace",
             bufsize=1,
             env=self.runtime_env(),
+            creationflags=creationflags,
         )
         self._process = process
 
