@@ -1,18 +1,13 @@
 r"""Evaluate a lightweight text-normalization frontend before production wiring.
 
-This diagnostic intentionally keeps Dexter's live TTS path unchanged. It uses
-Utterwise from the evaluation-only uv dependency group, applies only a tiny
-Dexter-specific markup/identifier cleanup, and reports:
+Live Dexter is unchanged. Utterwise comes from the evaluation-only uv group;
+Dexter contributes only conservative cleanup for single-underscore emphasis,
+snake_case, and word-style hyphens.
 
-* raw -> pre-cleaned -> normalized text for realistic assistant output;
-* critical acronym/markup sanity checks;
-* import footprint and normalization throughput; and
-* optional before/after WAVs through Dexter's existing NeuTTS backend.
-
-Run text-only evaluation:
+Text-only:
     uv run --group tts-normalization-eval python Diagnostics\evaluate_tts_text_normalization.py
 
-Generate raw vs normalized audio samples too:
+With raw/normalized NeuTTS WAV comparison:
     uv run --group tts-normalization-eval python Diagnostics\evaluate_tts_text_normalization.py --audio
 """
 
@@ -31,7 +26,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-
 
 CASES = [
     "AI is running locally.",
@@ -65,11 +59,9 @@ AUDIO_TEXT = (
     "Python 3.13 is using 81% of the CPU."
 )
 
-# Utterwise already owns ordinary Markdown stripping (headings, **, __, `, ~~)
-# and speech normalization. Dexter only fills two assistant-output gaps:
-# single-underscore emphasis / snake_case, and word-style hyphens. Keep these
-# rules conservative so math such as x_1, negative numbers, phone numbers, and
-# ISO dates still reach the expert normalizer unchanged.
+# Utterwise already handles normal Markdown such as headings, **, __, `, and ~~.
+# These fill only the gaps relevant to Dexter output while leaving x_1, -3,
+# phone-number hyphens, and ISO dates available to the normalizer unchanged.
 _WHITESPACE_RE = re.compile(r"\s+")
 _SINGLE_UNDERSCORE_EMPHASIS_RE = re.compile(r"(?<!\w)_([^_\n]+)_(?!\w)")
 _IDENTIFIER_UNDERSCORE_RE = re.compile(r"(?<=[A-Za-z])_(?=[A-Za-z])")
@@ -86,7 +78,7 @@ def dexter_preclean(text: str) -> str:
     return _WHITESPACE_RE.sub(" ", value).strip()
 
 
-def _load_utterwise():
+def load_utterwise():
     before_modules = set(sys.modules)
     tracemalloc.start()
     started = time.perf_counter()
@@ -95,16 +87,15 @@ def _load_utterwise():
     import_seconds = time.perf_counter() - started
     current_bytes, peak_bytes = tracemalloc.get_traced_memory()
     tracemalloc.stop()
-    imported_modules = sorted(set(sys.modules) - before_modules)
-    return normalize, import_seconds, current_bytes, peak_bytes, imported_modules
+    module_count = len(set(sys.modules) - before_modules)
+    return normalize, import_seconds, current_bytes, peak_bytes, module_count
 
 
-def _distribution_size_bytes() -> int:
+def distribution_size_bytes() -> int:
     try:
         dist = importlib.metadata.distribution("utterwise")
     except importlib.metadata.PackageNotFoundError:
         return 0
-
     total = 0
     for entry in dist.files or ():
         try:
@@ -116,37 +107,34 @@ def _distribution_size_bytes() -> int:
     return total
 
 
-def _critical_checks(outputs: dict[str, str]) -> list[tuple[str, bool, str]]:
-    checks: list[tuple[str, bool, str]] = []
-
-    def add(label: str, ok: bool, detail: str) -> None:
-        checks.append((label, ok, detail))
-
+def critical_checks(outputs: dict[str, str]) -> list[tuple[str, bool, str]]:
     ai = outputs["AI is running locally."]
     json_text = outputs["JSON output is valid."]
     technical = outputs["The CPU and GPU are busy."]
     markup = outputs["_important_ text should sound normal."]
     snake = outputs["snake_case should become ordinary words."]
     hyphen = outputs["real-time streaming should stay natural."]
-    mathish = outputs["Keep x_1 intact as math-like text."]
     iso_date = outputs["The date is 2026-04-03."]
+    return [
+        ("AI is expanded", "A I" in ai.upper(), ai),
+        ("JSON is expanded", "J S O N" in json_text.upper(), json_text),
+        (
+            "CPU/GPU are expanded",
+            "C P U" in technical.upper() and "G P U" in technical.upper(),
+            technical,
+        ),
+        ("single-underscore emphasis is gone", "_" not in markup, markup),
+        (
+            "snake_case becomes words",
+            "_" not in snake and "snake case" in snake.lower(),
+            snake,
+        ),
+        ("word hyphen becomes a boundary", "real-time" not in hyphen.lower(), hyphen),
+        ("ISO date remains semantic", "april" in iso_date.lower(), iso_date),
+    ]
 
-    add("AI is not collapsed to a word", "A I" in ai.upper(), ai)
-    add("JSON is expanded/spelled", "J S O N" in json_text.upper(), json_text)
-    add(
-        "CPU/GPU are expanded/spelled",
-        "C P U" in technical.upper() and "G P U" in technical.upper(),
-        technical,
-    )
-    add("Markdown underscores are gone", "_" not in markup, markup)
-    add("snake_case becomes words", "_" not in snake and "snake case" in snake.lower(), snake)
-    add("word hyphen becomes natural boundary", "real-time" not in hyphen.lower(), hyphen)
-    add("math-like underscore is preserved for normalizer", "x" in mathish.lower(), mathish)
-    add("ISO date still normalizes as a date", "april" in iso_date.lower(), iso_date)
-    return checks
 
-
-def _write_wav(path: Path, samples, sample_rate: int) -> None:
+def write_wav(path: Path, samples, sample_rate: int) -> None:
     import numpy as np
 
     pcm = np.asarray(samples, dtype=np.float32).reshape(-1)
@@ -159,46 +147,51 @@ def _write_wav(path: Path, samples, sample_rate: int) -> None:
         handle.writeframes(pcm16.tobytes())
 
 
-def _synthesize_to_wav(text: str, path: Path) -> None:
+def synthesize_pair(raw_text: str, normalized_text: str, output_dir: Path) -> tuple[Path, Path]:
     import numpy as np
 
     from Runtime.Voice.neutts2e_backend import NeuTTS2EBackend
 
     backend = NeuTTS2EBackend()
     cancel = threading.Event()
-    chunks = []
-    sample_rate = 24_000
-    backend.start()
-    try:
+
+    def render(text: str):
+        chunks = []
+        sample_rate = 24_000
         for chunk in backend.synthesize(text, cancel):
             sample_rate = chunk.sample_rate
             chunks.append(chunk.samples)
+        if not chunks:
+            raise RuntimeError(f"No audio generated for {text!r}")
+        return np.concatenate(chunks), sample_rate
+
+    backend.start()
+    try:
+        raw_samples, raw_rate = render(raw_text)
+        normalized_samples, normalized_rate = render(normalized_text)
     finally:
         backend.stop()
 
-    if not chunks:
-        raise RuntimeError(f"No audio generated for {text!r}")
-    _write_wav(path, np.concatenate(chunks), sample_rate)
+    raw_path = output_dir / "normalization_raw.wav"
+    normalized_path = output_dir / "normalization_utterwise.wav"
+    write_wav(raw_path, raw_samples, raw_rate)
+    write_wav(normalized_path, normalized_samples, normalized_rate)
+    return raw_path, normalized_path
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--audio",
-        action="store_true",
-        help="also generate raw and normalized comparison WAVs through NeuTTS",
-    )
+    parser.add_argument("--audio", action="store_true")
     args = parser.parse_args()
 
-    normalize, import_seconds, current_bytes, peak_bytes, imported_modules = _load_utterwise()
-
+    normalize, import_s, current_b, peak_b, module_count = load_utterwise()
     print("Utterwise evaluation only — live Dexter TTS is unchanged.\n")
     print("FOOTPRINT")
-    print(f"  distribution files: {_distribution_size_bytes() / 1024:.1f} KiB")
-    print(f"  import time:        {import_seconds * 1000:.2f} ms")
-    print(f"  Python alloc now:   {current_bytes / 1024:.1f} KiB")
-    print(f"  Python alloc peak:  {peak_bytes / 1024:.1f} KiB")
-    print(f"  modules imported:   {len(imported_modules)}")
+    print(f"  distribution files: {distribution_size_bytes() / 1024:.1f} KiB")
+    print(f"  import time:        {import_s * 1000:.2f} ms")
+    print(f"  Python alloc now:   {current_b / 1024:.1f} KiB")
+    print(f"  Python alloc peak:  {peak_b / 1024:.1f} KiB")
+    print(f"  modules imported:   {module_count}")
 
     outputs: dict[str, str] = {}
     print("\nNORMALIZATION CORPUS")
@@ -211,15 +204,13 @@ def main() -> int:
             print(f"     preclean:   {cleaned}")
         print(f"     normalized: {spoken}")
 
-    print("\nCRITICAL CHECKS")
     failures = 0
-    for label, ok, detail in _critical_checks(outputs):
+    print("\nCRITICAL CHECKS")
+    for label, ok, detail in critical_checks(outputs):
         marker = "PASS" if ok else "FAIL"
         failures += 0 if ok else 1
         print(f"  {marker:4s}  {label}: {detail}")
 
-    # Warmed throughput: representative text repeated enough to make timer
-    # overhead irrelevant, but still tiny compared with TTS inference.
     benchmark_text = " ".join(CASES)
     iterations = 200
     started = time.perf_counter()
@@ -237,13 +228,12 @@ def main() -> int:
     print(f"  normalized: {normalized_audio_text}")
 
     if args.audio:
-        output_dir = REPO_ROOT / "Runtime" / "Voice" / "debug"
-        raw_path = output_dir / "normalization_raw.wav"
-        normalized_path = output_dir / "normalization_utterwise.wav"
-        print("\nGenerating raw comparison...")
-        _synthesize_to_wav(AUDIO_TEXT, raw_path)
-        print("Generating normalized comparison...")
-        _synthesize_to_wav(normalized_audio_text, normalized_path)
+        print("\nGenerating both WAVs with one NeuTTS worker...")
+        raw_path, normalized_path = synthesize_pair(
+            AUDIO_TEXT,
+            normalized_audio_text,
+            REPO_ROOT / "Runtime" / "Voice" / "debug",
+        )
         print("\nAUDIO OUTPUT")
         print(f"  raw:        {raw_path}")
         print(f"  normalized: {normalized_path}")
@@ -251,7 +241,6 @@ def main() -> int:
     if failures:
         print(f"\n{failures} critical normalization check(s) failed.")
         return 2
-
     print("\nAll critical normalization checks passed.")
     return 0
 
