@@ -2,7 +2,7 @@
 
 Dexter's selected production TTS is **NeuTTS-2E**, speaker **paul**, neutral emotion.
 
-> **Current production status (2026-08-25):** the throughput/choppiness problem is considered solved on the target machine. Production now uses the Q4 backbone, 8 generation threads, Windows AboveNormal process creation, NeuCodec ORT 2-intra/1-inter threading, 40-frame first / 50-frame steady streaming, and Core Audio/WASAPI default-device following via SoundCard. Repeated fully-concurrent test runs measured about **0.79-0.81 RTF with zero PCM underflows**. Older benchmark sections below are retained as the progression that led to these settings.
+> **Current production status (2026-08-25):** the throughput/choppiness problem is considered solved on the target machine. Production now uses the Q4 backbone, **128/128 llama.cpp batch/ubatch**, 8 generation threads, Windows AboveNormal process creation, NeuCodec ORT 2-intra/1-inter threading, 40-frame first / 50-frame steady streaming, and Core Audio/WASAPI default-device following via SoundCard. Repeated fully-concurrent test runs remain comfortably faster than realtime. The validated 128/128 batch setting reduced the Q4 backbone by about **325 MB working set / 644 MB private memory** versus upstream 512/512 while sustained Gemma + TTS measured **0.794 RTF**. Older benchmark sections below are retained as the progression that led to these settings.
 
 ## Runtime architecture
 
@@ -20,6 +20,7 @@ Production uses:
 
 - backbone: `neuphonic/neutts-2e-q4-gguf`
 - backbone device: Intel Arc 140T via llama.cpp Vulkan, visible device `0`
+- llama.cpp batch / ubatch: **128 / 128**; `use_mlock=True` remains the upstream setting
 - codec: `neuphonic/neucodec-onnx-decoder-int8` on CPU
 - Perth watermarking: enabled
 - scheduling: Arc token generation is pipelined with CPU codec/watermark work
@@ -56,6 +57,8 @@ A later steady-window benchmark showed that keeping the upstream 25-frame / 0.5 
 - 50 frames: **RTF 0.733**, worst measured chunk deficit **-0.067 s**
 
 During real simultaneous Gemma generation, an additional problem emerged: NeuCodec's default ONNX Runtime CPU pool competed aggressively with the Arc/Vulkan generation path. Constraining ORT to **2 intra-op / 1 inter-op threads** was the largest live win, dropping the first concurrent request from about **1.26 RTF to ~0.8 RTF**. With synthesis now comfortably faster than realtime, changing the first streaming window from 25 to **40 frames** removed the remaining measured startup underflows while keeping first audio around one second. Production therefore uses **40 first / 50 steady**.
+
+A staged memory audit then showed that the Q4 llama.cpp backbone was the largest single resident allocation: roughly **+1.04 GB working set** during normal NeuTTS construction, versus about +321 MB for the ONNX codec and +78 MB for Perth. Fresh-process A/B testing isolated llama.cpp's batch buffers as a large avoidable cost. `use_mlock=False` did not help, but reducing `n_batch/n_ubatch` from 512/512 to 128/128 saved about **324.5 MB working set and 644.2 MB private memory** on the backbone. Isolated synthesis was effectively unchanged (second-run RTF 0.634 vs 0.633 at 512). In a corrected sustained-contention test where Gemma remained actively generating throughout the complete TTS window, 512 measured **0.807 RTF / 1.001 s TTFA**, 256 measured **0.781 / 1.030 s**, and 128 measured **0.794 / 1.079 s**. Because 128 preserves realtime headroom while saving the most memory, it is now the production default.
 
 The playback layer keeps a **0.5 s jitter reserve**. TTS output now uses `windows_default_audio_sink.py` with SoundCard/Core Audio/WASAPI instead of relying on PortAudio's cached default output. The sink checks the live Windows default render endpoint and reopens only TTS playback when headphones/speakers are plugged or unplugged; Moonshine's always-open PortAudio microphone is untouched. PTT interruption still invalidates queued/audible TTS immediately.
 
@@ -151,6 +154,12 @@ Normal hidden shortcut launches preserve Host/worker stderr at:
 %LOCALAPPDATA%\Dexter\Diagnostics\host-stderr.log
 ```
 
+The production worker launcher writes the active llama.cpp batch settings there at startup, for example:
+
+```text
+[TTS] llama.cpp backbone batch=128, ubatch=128, mlock=upstream-default
+```
+
 ## Live Host behavior
 
 When Voice output is enabled, `SpeechOutputService` starts Paul in parallel with Gateway and Moonshine. Responses remain text-only until TTS is ready. A TTS startup failure also leaves the Host running text-only.
@@ -171,6 +180,7 @@ uv run python -m Runtime.Host.app
 - `windows_default_audio_sink.py` — production Core Audio/WASAPI sink that follows the live Windows default output.
 - `output_service.py` — restartable Host-facing Voice lifecycle; async warm-up, disable/unload, degraded mode and response gating.
 - `neutts2e_backend.py` — `SpeechBackend` adapter and production Arc/pipeline runtime defaults.
+- `neutts2e_worker_launcher.py` — isolated production llama.cpp constructor tuning, then handoff to the normal worker.
 - `neutts2e_worker.py` — persistent NeuTTS-2E / Paul child process while Voice is enabled.
 - `neutts2e_pipelined_stream.py` — validated Arc-generation / CPU-Perth pipeline and hybrid streaming windows.
 - `neutts2e_runtime.py` — auth migration, runtime doctor, streaming smoke test, and cancellation test.
@@ -179,9 +189,9 @@ uv run python -m Runtime.Host.app
 
 ## Remaining TTS work
 
-The live throughput/choppiness issue is solved for the current machine. Remaining high-value work is:
+The live throughput/choppiness issue is solved for the current machine, and the largest easy backbone allocation has now been reduced. Remaining high-value work is:
 
-1. attribute and reduce the long-lived TTS worker's oversized RAM footprint;
+1. continue memory cleanup in the **ONNX codec and eager Python dependency/import stack**;
 2. fix text-queue overflow so queue pressure cannot cancel the rest of an assistant response;
 3. only revisit NPU/OpenVINO/other backend experiments if profiling shows a concrete latency or memory benefit.
 
