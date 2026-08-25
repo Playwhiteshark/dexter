@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from Runtime.Host.overlay import DexterOverlay
+from Runtime.Host.voice_output_control import VoiceOutputControl
 
 
 class OverlayUITests(unittest.TestCase):
@@ -24,12 +25,13 @@ class OverlayUITests(unittest.TestCase):
         self.overlay.deleteLater()
         self._app.processEvents()
 
-    def test_history_cards_are_inserted_before_terminal_stretch(self) -> None:
+    def test_history_cards_append_without_expanding_spacer(self) -> None:
         self.overlay.finalize_user_prompt("first")
         self.overlay.finalize_user_prompt("second")
 
         layout = self.overlay.history_layout
-        self.assertEqual(layout.count(), 3)
+        self.assertEqual(layout.count(), 2)
+        self.assertTrue(layout.alignment() & Qt.AlignmentFlag.AlignTop)
         self.assertIs(
             layout.itemAt(0).widget(),
             self.overlay._permanent_cards[0],
@@ -38,7 +40,6 @@ class OverlayUITests(unittest.TestCase):
             layout.itemAt(1).widget(),
             self.overlay._permanent_cards[1],
         )
-        self.assertIsNotNone(layout.itemAt(2).spacerItem())
 
     def test_assistant_markdown_preserves_raw_text_for_copy(self) -> None:
         self.overlay.begin_assistant_response()
@@ -66,6 +67,30 @@ class OverlayUITests(unittest.TestCase):
 
         card.copy_button.click()
         self.assertEqual(QApplication.clipboard().text(), expected)
+
+    def test_voice_status_tracks_resource_lifecycle(self) -> None:
+        requested: list[bool] = []
+        control = VoiceOutputControl(
+            self.overlay,
+            enabled=True,
+            on_toggle=requested.append,
+        )
+
+        self.assertEqual(control.voice_status.text(), "Voice loading…")
+
+        control.set_state("ready")
+        self.assertEqual(control.voice_status.text(), "Voice ready")
+
+        control.set_state("stopping")
+        self.assertEqual(control.voice_status.text(), "Voice unloading…")
+
+        control.set_state("off")
+        self.assertEqual(control.voice_status.text(), "Voice off")
+
+        control.set_state("error")
+        self.assertEqual(control.voice_status.text(), "Voice error")
+
+        self.assertEqual(requested, [])
 
 
 if __name__ == "__main__":
