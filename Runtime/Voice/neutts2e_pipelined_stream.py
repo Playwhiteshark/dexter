@@ -6,6 +6,12 @@ GGUF backbone on Intel Arc while codec/watermark work remains on CPU, so these
 independent stages can overlap without changing the generated token sequence,
 watermarking, or output ordering.
 
+Dexter keeps NeuTTS's 25-frame first window for low startup latency, then uses a
+larger steady-state window (50 frames by default) so codec/Perth overhead is paid
+less often once speech has begun. ``DEXTER_TTS_STEADY_STREAM_FRAMES`` can
+explicitly override that steady-state size; setting it to 25 restores uniform
+upstream-sized windows.
+
 This module mirrors the pinned NeuTTS 1.4.1 private streaming method. Keep the
 NeuTTS dependency pinned while this integration exists and revalidate the
 pipeline before upgrading NeuTTS.
@@ -13,6 +19,7 @@ pipeline before upgrading NeuTTS.
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
 from dataclasses import dataclass
@@ -26,6 +33,7 @@ class _DecodeJob:
     codes: tuple[str, ...]
     sample_start: int
     sample_end: int | None
+    stride_samples: int
     final: bool
 
 
@@ -44,51 +52,63 @@ def _frame_weight(frame: np.ndarray) -> np.ndarray:
     return 0.5 - np.abs(t - 0.5)
 
 
+def _steady_stream_frames(first_frames: int) -> int:
+    raw = os.environ.get("DEXTER_TTS_STEADY_STREAM_FRAMES", "50").strip()
+    try:
+        frames = int(raw)
+    except ValueError as exc:
+        raise RuntimeError("DEXTER_TTS_STEADY_STREAM_FRAMES must be an integer") from exc
+    if frames < 10 or frames > 100:
+        raise RuntimeError("DEXTER_TTS_STEADY_STREAM_FRAMES must be between 10 and 100")
+    return frames
+
+
 def _incremental_overlap_segment(
     previous: np.ndarray | None,
     current: np.ndarray,
     *,
-    stride: int,
+    previous_stride: int | None,
+    emit_samples: int,
     final: bool,
 ) -> np.ndarray:
     """Produce only the not-yet-emitted overlap-add segment.
 
-    NeuTTS's upstream implementation recomputes ``_linear_overlap_add`` over
-    every decoded window after each new chunk, then slices away all audio that
-    was already emitted. With Dexter's window geometry each frame is shorter
-    than two strides, so the new segment can only depend on the current frame
-    and the immediately preceding frame. Computing those two contributions is
-    mathematically identical for the emitted segment while making streaming
-    overlap-add O(n) instead of O(n^2) over an utterance.
+    ``previous_stride`` is the distance from the previous frame's origin to the
+    current frame's origin. ``emit_samples`` is the distance from the current
+    frame's origin to the next regular frame's origin. Keeping those separate is
+    what lets Dexter use a 25-frame first window followed by larger steady-state
+    windows without changing the overlap math.
+
+    With NeuTTS's current window geometry, the not-yet-emitted region can depend
+    only on the current frame and the immediately preceding frame. This is
+    mathematically identical to recomputing the complete overlap-add history,
+    while remaining O(n) over a streamed utterance.
     """
-    if current.ndim != 1:
-        current = np.asarray(current).reshape(-1)
-    if previous is not None and previous.ndim != 1:
+    current = np.asarray(current).reshape(-1)
+    if previous is not None:
         previous = np.asarray(previous).reshape(-1)
 
-    if previous is not None and int(previous.shape[-1]) >= 2 * stride:
-        raise RuntimeError("NeuTTS overlap window unexpectedly spans more than two strides")
-    if int(current.shape[-1]) >= 2 * stride:
-        raise RuntimeError("NeuTTS overlap window unexpectedly spans more than two strides")
-
-    # Local coordinates: current starts at 0; previous starts at -stride.
-    start = 0
-    if final:
-        previous_end = int(previous.shape[-1]) - stride if previous is not None else 0
-        end = max(int(current.shape[-1]), previous_end)
+    if emit_samples <= 0:
+        raise RuntimeError("NeuTTS emit stride must be positive")
+    if previous is not None:
+        if previous_stride is None or previous_stride <= 0:
+            raise RuntimeError("NeuTTS previous stride must be positive")
+        previous_tail = max(0, int(previous.shape[-1]) - previous_stride)
     else:
-        end = stride
+        previous_tail = 0
 
-    if end <= start:
+    end = max(int(current.shape[-1]), previous_tail) if final else emit_samples
+    if end <= 0:
         return np.empty(0, dtype=current.dtype)
 
-    out = np.zeros(end - start, dtype=current.dtype)
-    sum_weight = np.zeros(end - start, dtype=current.dtype)
+    out = np.zeros(end, dtype=current.dtype)
+    sum_weight = np.zeros(end, dtype=current.dtype)
 
     if previous is not None:
+        assert previous_stride is not None
         prev_weight = _frame_weight(previous)
-        prev_local_start = stride
-        prev_local_end = min(int(previous.shape[-1]), stride + end)
+        prev_local_start = previous_stride
+        prev_local_end = min(int(previous.shape[-1]), previous_stride + end)
         if prev_local_end > prev_local_start:
             count = prev_local_end - prev_local_start
             out[:count] += previous[prev_local_start:prev_local_end] * prev_weight[
@@ -123,6 +143,9 @@ def _pipelined_infer_stream_ggml(
     prompt = self._ggml_prompt(ref_codes, ref_text, input_text, emotion)
     self.backbone.reset()
 
+    first_frames = int(self.streaming_frames_per_chunk)
+    steady_frames = _steady_stream_frames(first_frames)
+
     # Two pending windows are enough to keep Arc generation ahead without
     # letting cancellation accumulate a large amount of useless work.
     jobs: queue.Queue[_DecodeJob | _ProducerError | object] = queue.Queue(maxsize=2)
@@ -140,6 +163,7 @@ def _pipelined_infer_stream_ggml(
     def producer() -> None:
         token_cache: list[str] = [f"<|speech_{idx}|>" for idx in ref_codes]
         n_decoded_tokens = len(ref_codes)
+        regular_windows = 0
         try:
             for item in self.backbone(
                 prompt,
@@ -154,9 +178,10 @@ def _pipelined_infer_stream_ggml(
                     return
 
                 token_cache.append(item["choices"][0]["text"])
+                frames = first_frames if regular_windows == 0 else steady_frames
                 if (
-                    len(token_cache[n_decoded_tokens:])
-                    < self.streaming_frames_per_chunk + self.streaming_lookforward
+                    len(token_cache) - n_decoded_tokens
+                    < frames + self.streaming_lookforward
                 ):
                     continue
 
@@ -168,29 +193,31 @@ def _pipelined_infer_stream_ggml(
                 )
                 tokens_end = (
                     n_decoded_tokens
-                    + self.streaming_frames_per_chunk
+                    + frames
                     + self.streaming_lookforward
                     + self.streaming_overlap_frames
                 )
                 sample_start = (n_decoded_tokens - tokens_start) * self.hop_length
                 sample_end = (
                     sample_start
-                    + (self.streaming_frames_per_chunk + 2 * self.streaming_overlap_frames)
-                    * self.hop_length
+                    + (frames + 2 * self.streaming_overlap_frames) * self.hop_length
                 )
+                stride_samples = frames * self.hop_length
                 if not put(
                     _DecodeJob(
                         codes=tuple(token_cache[tokens_start:tokens_end]),
                         sample_start=sample_start,
                         sample_end=sample_end,
+                        stride_samples=stride_samples,
                         final=False,
                     )
                 ):
                     return
-                n_decoded_tokens += self.streaming_frames_per_chunk
+                n_decoded_tokens += frames
+                regular_windows += 1
 
             remaining_tokens = len(token_cache) - n_decoded_tokens
-            if len(token_cache) > n_decoded_tokens:
+            if remaining_tokens > 0:
                 tokens_start = max(
                     len(token_cache)
                     - (
@@ -211,6 +238,7 @@ def _pipelined_infer_stream_ggml(
                         codes=tuple(token_cache[tokens_start:]),
                         sample_start=sample_start,
                         sample_end=None,
+                        stride_samples=max(1, remaining_tokens * self.hop_length),
                         final=True,
                     )
                 ):
@@ -228,6 +256,7 @@ def _pipelined_infer_stream_ggml(
     producer_thread.start()
 
     previous_recon: np.ndarray | None = None
+    previous_stride: int | None = None
 
     try:
         while True:
@@ -251,10 +280,12 @@ def _pipelined_infer_stream_ggml(
             processed_recon = _incremental_overlap_segment(
                 previous_recon,
                 recon,
-                stride=self.streaming_stride_samples,
+                previous_stride=previous_stride,
+                emit_samples=value.stride_samples,
                 final=value.final,
             )
             previous_recon = recon
+            previous_stride = value.stride_samples
             yield processed_recon
     finally:
         stop_event.set()
