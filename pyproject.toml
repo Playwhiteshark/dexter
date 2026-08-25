@@ -10,7 +10,7 @@ dependencies = [
   "numpy>=2.2.6,<3",
   "sounddevice>=0.5,<1",
   "neutts==1.4.1",
-  "utterwise==0.1.0",
+  "utterwise==0.1.1",
   "onnxruntime==1.29.0",
   "llama-cpp-python>=0.3.21,<0.4",
   "gguf",
