@@ -53,6 +53,7 @@ Runtime/Model Gateway/Scheduled Task/
 # ============================================================
 Diagnostics/jarvis-config-audit_*.md
 Diagnostics/runtime-performance-audit_*.json
+Diagnostics/tts-memory-probe_*.json
 
 # ============================================================
 # Local duplicate/package copies of Dexter Tools
