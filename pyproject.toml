@@ -10,17 +10,10 @@ dependencies = [
   "numpy>=2.2.6,<3",
   "sounddevice>=0.5,<1",
   "neutts==1.4.1",
+  "utterwise==0.1.0",
   "onnxruntime==1.29.0",
   "llama-cpp-python>=0.3.21,<0.4",
   "gguf",
-]
-
-# Evaluation-only text-normalization tooling. This is intentionally not part of
-# Dexter's production dependency set until it earns promotion in diagnostics.
-# Utterwise core is pure Python and declares zero runtime dependencies.
-[dependency-groups]
-tts-normalization-eval = [
-  "utterwise==0.1.0",
 ]
 
 [tool.uv]
