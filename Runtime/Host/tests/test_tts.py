@@ -34,6 +34,22 @@ class _FakeBackend:
         self.stopped = True
 
 
+class _BlockingFirstBackend(_FakeBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_started = threading.Event()
+        self.release_first = threading.Event()
+
+    def synthesize(self, text: str, cancel_event: threading.Event):
+        self.requests.append(text)
+        if len(self.requests) == 1:
+            self.first_started.set()
+            self.release_first.wait(1.0)
+        self.generated.set()
+        if not cancel_event.is_set():
+            yield AudioChunk(np.zeros(80, dtype=np.float32), 16_000)
+
+
 class _FakeSink:
     def __init__(self) -> None:
         self.started = False
@@ -67,17 +83,16 @@ class SpeechTextBufferTests(unittest.TestCase):
         )
         self.assertEqual(buffer.flush(), ["The next"])
 
-    def test_clause_punctuation_does_not_split_an_utterance(self) -> None:
+    def test_clause_does_not_create_a_separate_tts_unit(self) -> None:
         buffer = SpeechTextBuffer()
         self.assertEqual(
-            buffer.feed("Dexter should keep this clause together, while the sentence"),
+            buffer.feed("The useful part is that Dexter can begin speaking, while more text"),
             [],
         )
         self.assertEqual(
-            buffer.feed(" is still arriving. The next"),
-            ["Dexter should keep this clause together, while the sentence is still arriving."],
+            buffer.feed(" finishes the sentence. Next"),
+            ["The useful part is that Dexter can begin speaking, while more text finishes the sentence."],
         )
-        self.assertEqual(buffer.flush(), ["The next"])
 
     def test_long_unpunctuated_text_is_bounded(self) -> None:
         buffer = SpeechTextBuffer(max_chars=80)
@@ -126,6 +141,30 @@ class VoiceOutputTests(unittest.TestCase):
                 ["First sentence.", "Still generating"],
             )
         finally:
+            output.stop()
+
+    def test_sentences_queued_behind_active_request_are_coalesced(self) -> None:
+        backend = _BlockingFirstBackend()
+        sink = _FakeSink()
+        output = VoiceOutput(backend, sink=sink, max_coalesced_units=3)
+        output.start()
+        try:
+            output.begin_response()
+            output.add_text("First sentence.")
+            self.assertTrue(backend.first_started.wait(1.0))
+
+            output.add_text("Second sentence. Third sentence.")
+            backend.release_first.set()
+
+            deadline = time.monotonic() + 1.0
+            while len(backend.requests) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(
+                backend.requests,
+                ["First sentence.", "Second sentence. Third sentence."],
+            )
+        finally:
+            backend.release_first.set()
             output.stop()
 
     def test_interrupt_invalidates_current_response(self) -> None:
