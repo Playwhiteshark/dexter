@@ -77,31 +77,64 @@ class NeuCodecOnnxDecoder:
 
         from huggingface_hub import hf_hub_download
 
-        onnx_path = hf_hub_download(
+        common_kwargs = dict(
             repo_id=model_id,
-            filename="model.onnx",
             revision=revision,
             cache_dir=cache_dir,
             force_download=force_download,
             proxies=proxies,
             resume_download=resume_download,
-            local_files_only=local_files_only,
             token=token,
         )
-        # Preserve upstream's meta.yaml fetch/download-count behavior. It is not
-        # needed for inference, so failure here should match hf_hub_download's
-        # normal behavior rather than being silently ignored.
-        hf_hub_download(
-            repo_id=model_id,
-            filename="meta.yaml",
-            revision=revision,
-            cache_dir=cache_dir,
-            force_download=force_download,
-            proxies=proxies,
-            resume_download=resume_download,
-            local_files_only=local_files_only,
-            token=token,
-        )
+
+        # Normal Dexter startup should not depend on Hugging Face being online
+        # once the decoder has already been cached. hf_hub_download() may perform
+        # remote metadata checks in its normal mode, so try the exact cached file
+        # first and use upstream online behavior only on a genuine cache miss.
+        if local_files_only or force_download:
+            onnx_path = hf_hub_download(
+                filename="model.onnx",
+                local_files_only=local_files_only,
+                **common_kwargs,
+            )
+        else:
+            try:
+                onnx_path = hf_hub_download(
+                    filename="model.onnx",
+                    local_files_only=True,
+                    **common_kwargs,
+                )
+                print(
+                    "[TTS] NeuCodec source=local-cache (model.onnx)",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            except Exception:
+                onnx_path = hf_hub_download(
+                    filename="model.onnx",
+                    local_files_only=False,
+                    **common_kwargs,
+                )
+
+        # meta.yaml is not required for inference. Preserve it when already
+        # cached (or when the caller explicitly requests online behavior), but do
+        # not turn a healthy cached decoder into a startup network dependency.
+        try:
+            hf_hub_download(
+                filename="meta.yaml",
+                local_files_only=True,
+                **common_kwargs,
+            )
+        except Exception:
+            if local_files_only:
+                raise
+            if force_download:
+                hf_hub_download(
+                    filename="meta.yaml",
+                    local_files_only=False,
+                    **common_kwargs,
+                )
+
         return cls(onnx_path)
 
     def encode_code(self, *args: Any, **kwargs: Any):
