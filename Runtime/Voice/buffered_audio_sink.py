@@ -6,8 +6,10 @@ buffer so ordinary scheduling jitter does not become audible.
 
 The selected Arc + pipelined-Perth production path now synthesizes faster than
 real time, so the buffer is a jitter reserve rather than compensation for a
-permanent producer deficit. PTT interruption still aborts the PortAudio stream
-and clears all queued PCM immediately.
+permanent producer deficit. PTT interruption still aborts playback and clears
+all queued PCM immediately. When the output format is known in advance, Dexter
+keeps the PortAudio stream open across interruptions so Windows device-open
+latency is not paid on the first PCM of every response.
 """
 
 from __future__ import annotations
@@ -39,6 +41,8 @@ class BufferedSoundDeviceAudioSink:
         rebuffer_seconds: float = 0.5,
         max_buffer_seconds: float = 5.0,
         startup_max_wait_seconds: float = 0.75,
+        expected_sample_rate: int | None = None,
+        expected_channels: int | None = None,
         stream_factory: StreamFactory | None = None,
     ) -> None:
         if prebuffer_seconds <= 0:
@@ -49,12 +53,26 @@ class BufferedSoundDeviceAudioSink:
             raise ValueError("max_buffer_seconds must exceed the reserve sizes")
         if startup_max_wait_seconds <= 0:
             raise ValueError("startup_max_wait_seconds must be positive")
+        if (expected_sample_rate is None) != (expected_channels is None):
+            raise ValueError(
+                "expected_sample_rate and expected_channels must be provided together"
+            )
+        if expected_sample_rate is not None and expected_sample_rate <= 0:
+            raise ValueError("expected_sample_rate must be positive")
+        if expected_channels is not None and expected_channels <= 0:
+            raise ValueError("expected_channels must be positive")
 
         self.device = device
         self.prebuffer_seconds = float(prebuffer_seconds)
         self.rebuffer_seconds = float(rebuffer_seconds)
         self.max_buffer_seconds = float(max_buffer_seconds)
         self.startup_max_wait_seconds = float(startup_max_wait_seconds)
+        self.expected_sample_rate = (
+            int(expected_sample_rate) if expected_sample_rate is not None else None
+        )
+        self.expected_channels = (
+            int(expected_channels) if expected_channels is not None else None
+        )
         self._stream_factory = stream_factory
 
         self._condition = threading.Condition(threading.RLock())
@@ -69,10 +87,20 @@ class BufferedSoundDeviceAudioSink:
         self._generation = 0
         self._closed = False
 
+    @property
+    def _has_fixed_format(self) -> bool:
+        return self.expected_sample_rate is not None
+
     def start(self) -> None:
-        # PortAudio is opened lazily when the first TTS chunk reveals format.
+        # NeuTTS has a fixed 24 kHz mono format, so its production sink can open
+        # PortAudio during model startup rather than on the first audible chunk.
+        # Generic callers may omit the expected format and retain lazy opening.
         with self._condition:
             self._closed = False
+            if self._has_fixed_format:
+                self._sample_rate = self.expected_sample_rate
+                self._channels = self.expected_channels
+                self._open_stream_locked()
 
     def play(self, chunk: AudioChunk, cancel_event: threading.Event) -> None:
         if cancel_event.is_set():
@@ -109,6 +137,7 @@ class BufferedSoundDeviceAudioSink:
             if self._sample_rate is None:
                 self._sample_rate = sample_rate
                 self._channels = channels
+            if self._stream is None:
                 self._open_stream_locked()
 
             max_frames = max(1, int(self.max_buffer_seconds * sample_rate))
@@ -138,12 +167,20 @@ class BufferedSoundDeviceAudioSink:
         with self._condition:
             self._generation += 1
             stream = self._stream
-            self._stream = None
             self._stream_started = False
-            self._reset_buffer_locked(clear_format=True)
+            if self._has_fixed_format:
+                # Keep the opened device handle. abort() stops callback playback
+                # immediately but PortAudio streams may be started again.
+                self._reset_buffer_locked(clear_format=False)
+            else:
+                self._stream = None
+                self._reset_buffer_locked(clear_format=True)
             self._condition.notify_all()
 
-        self._abort_and_close(stream)
+        if self._has_fixed_format:
+            self._abort_stream(stream)
+        else:
+            self._abort_and_close(stream)
 
     def stop(self) -> None:
         with self._condition:
@@ -232,7 +269,10 @@ class BufferedSoundDeviceAudioSink:
                     self._generation += 1
                     self._stream = None
                     self._stream_started = False
-                    self._reset_buffer_locked(clear_format=True)
+                    self._reset_buffer_locked(clear_format=not self._has_fixed_format)
+                    if self._has_fixed_format:
+                        self._sample_rate = self.expected_sample_rate
+                        self._channels = self.expected_channels
                     self._condition.notify_all()
             self._abort_and_close(stream)
             if still_current and propagate:
@@ -291,6 +331,15 @@ class BufferedSoundDeviceAudioSink:
         if clear_format:
             self._sample_rate = None
             self._channels = None
+
+    @staticmethod
+    def _abort_stream(stream: Any | None) -> None:
+        if stream is None:
+            return
+        try:
+            stream.abort()
+        except Exception:
+            LOGGER.debug("Audio stream abort failed", exc_info=True)
 
     @staticmethod
     def _abort_and_close(stream: Any | None) -> None:
