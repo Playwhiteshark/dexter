@@ -1,4 +1,4 @@
-"""Evaluate a lightweight text-normalization frontend before production wiring.
+r"""Evaluate a lightweight text-normalization frontend before production wiring.
 
 This diagnostic intentionally keeps Dexter's live TTS path unchanged. It uses
 Utterwise from the evaluation-only uv dependency group, applies only a tiny
@@ -55,6 +55,8 @@ CASES = [
     "The price is $12.50.",
     "The temperature is 25°C.",
     "Run the SQL query through the API.",
+    "Keep x_1 intact as math-like text.",
+    "The date is 2026-04-03.",
 ]
 
 AUDIO_TEXT = (
@@ -63,28 +65,24 @@ AUDIO_TEXT = (
     "Python 3.13 is using 81% of the CPU."
 )
 
-# This is intentionally the only Dexter-owned linguistic-ish layer in the
-# experiment. It removes presentation syntax/identifier separators that are
-# specific to assistant output; Utterwise owns actual speech normalization.
+# Utterwise already owns ordinary Markdown stripping (headings, **, __, `, ~~)
+# and speech normalization. Dexter only fills two assistant-output gaps:
+# single-underscore emphasis / snake_case, and word-style hyphens. Keep these
+# rules conservative so math such as x_1, negative numbers, phone numbers, and
+# ISO dates still reach the expert normalizer unchanged.
 _WHITESPACE_RE = re.compile(r"\s+")
-_WORD_HYPHEN_RE = re.compile(r"(?<=\w)-(?=\w)")
+_SINGLE_UNDERSCORE_EMPHASIS_RE = re.compile(r"(?<!\w)_([^_\n]+)_(?!\w)")
+_IDENTIFIER_UNDERSCORE_RE = re.compile(r"(?<=[A-Za-z])_(?=[A-Za-z])")
+_WORD_HYPHEN_RE = re.compile(
+    r"(?<=[A-Za-z])-(?=[A-Za-z0-9])|(?<=[A-Za-z0-9])-(?=[A-Za-z])"
+)
 
 
 def dexter_preclean(text: str) -> str:
-    value = text
-    # Presentation-only Markdown markers. These have no useful spoken form.
-    value = value.replace("**", "").replace("__", "").replace("~~", "")
-    value = value.replace("`", "")
-    value = value.replace("*", "")
-
-    # Underscores are commonly Markdown emphasis or code identifiers in Dexter
-    # output. For speech, both are better represented as a word boundary.
-    value = value.replace("_", " ")
-
-    # Convert word-internal hyphens to a boundary while preserving minus signs.
+    value = _SINGLE_UNDERSCORE_EMPHASIS_RE.sub(r"\1", text)
+    value = _IDENTIFIER_UNDERSCORE_RE.sub(" ", value)
     value = _WORD_HYPHEN_RE.sub(" ", value)
     value = value.replace("—", ", ").replace("–", ", ")
-
     return _WHITESPACE_RE.sub(" ", value).strip()
 
 
@@ -130,6 +128,8 @@ def _critical_checks(outputs: dict[str, str]) -> list[tuple[str, bool, str]]:
     markup = outputs["_important_ text should sound normal."]
     snake = outputs["snake_case should become ordinary words."]
     hyphen = outputs["real-time streaming should stay natural."]
+    mathish = outputs["Keep x_1 intact as math-like text."]
+    iso_date = outputs["The date is 2026-04-03."]
 
     add("AI is not collapsed to a word", "A I" in ai.upper(), ai)
     add("JSON is expanded/spelled", "J S O N" in json_text.upper(), json_text)
@@ -141,6 +141,8 @@ def _critical_checks(outputs: dict[str, str]) -> list[tuple[str, bool, str]]:
     add("Markdown underscores are gone", "_" not in markup, markup)
     add("snake_case becomes words", "_" not in snake and "snake case" in snake.lower(), snake)
     add("word hyphen becomes natural boundary", "real-time" not in hyphen.lower(), hyphen)
+    add("math-like underscore is preserved for normalizer", "x" in mathish.lower(), mathish)
+    add("ISO date still normalizes as a date", "april" in iso_date.lower(), iso_date)
     return checks
 
 
