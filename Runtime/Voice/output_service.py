@@ -13,6 +13,12 @@ from collections.abc import Callable
 from Runtime.Voice.buffered_audio_sink import BufferedSoundDeviceAudioSink
 from Runtime.Voice.neutts2e_backend import NeuTTS2EBackend
 from Runtime.Voice.tts import VoiceOutput, VoiceOutputState
+from Runtime.Voice.tts_trace import (
+    TracingBufferedSoundDeviceAudioSink,
+    TracingSpeechBackend,
+    TracingVoiceOutput,
+    enabled as tts_trace_enabled,
+)
 
 ErrorCallback = Callable[[str], None]
 ReadyCallback = Callable[[dict[str, object] | None], None]
@@ -22,10 +28,20 @@ class SpeechOutputService:
     """Own one VoiceOutput instance without exposing model lifecycle to Qt."""
 
     def __init__(self, output: VoiceOutput | None = None) -> None:
-        self.output = output or VoiceOutput(
-            NeuTTS2EBackend(),
-            sink=BufferedSoundDeviceAudioSink(),
-        )
+        if output is not None:
+            self.output = output
+        elif tts_trace_enabled():
+            self.output = TracingVoiceOutput(
+                TracingSpeechBackend(NeuTTS2EBackend()),
+                sink=TracingBufferedSoundDeviceAudioSink(),
+            )
+        else:
+            # Keep the normal production path byte-for-byte equivalent when
+            # tracing is disabled; diagnostics must not perturb live behavior.
+            self.output = VoiceOutput(
+                NeuTTS2EBackend(),
+                sink=BufferedSoundDeviceAudioSink(),
+            )
         self._lock = threading.Lock()
         self._ready = False
         self._response_active = False
