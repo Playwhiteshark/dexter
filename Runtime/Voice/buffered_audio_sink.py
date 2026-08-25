@@ -167,6 +167,7 @@ class BufferedSoundDeviceAudioSink:
         with self._condition:
             self._generation += 1
             stream = self._stream
+            was_started = self._stream_started
             self._stream_started = False
             if self._has_fixed_format:
                 # Keep the opened device handle. abort() stops callback playback
@@ -178,7 +179,8 @@ class BufferedSoundDeviceAudioSink:
             self._condition.notify_all()
 
         if self._has_fixed_format:
-            self._abort_stream(stream)
+            if was_started:
+                self._abort_stream(stream)
         else:
             self._abort_and_close(stream)
 
