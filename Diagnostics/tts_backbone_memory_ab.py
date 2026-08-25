@@ -96,17 +96,29 @@ def _memory() -> dict[str, float]:
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     psapi = ctypes.WinDLL("psapi", use_last_error=True)
+
+    kernel32.GetCurrentProcess.argtypes = []
     kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    psapi.GetProcessMemoryInfo.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(PMCEX),
+        wintypes.DWORD,
+    ]
+    psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+    kernel32.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(MEMSTAT)]
+    kernel32.GlobalMemoryStatusEx.restype = wintypes.BOOL
+
+    process = kernel32.GetCurrentProcess()
     counters = PMCEX()
     counters.cb = ctypes.sizeof(counters)
-    if not psapi.GetProcessMemoryInfo(
-        kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb
-    ):
+    if not psapi.GetProcessMemoryInfo(process, ctypes.byref(counters), counters.cb):
         raise ctypes.WinError(ctypes.get_last_error())
+
     status = MEMSTAT()
     status.dwLength = ctypes.sizeof(status)
     if not kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
         raise ctypes.WinError(ctypes.get_last_error())
+
     return {
         "working_set_mb": _mb(counters.WorkingSetSize),
         "private_mb": _mb(counters.PrivateUsage),
