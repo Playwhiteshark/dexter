@@ -187,12 +187,15 @@ class _MessageCard(QFrame):
         *,
         draft: bool = False,
         activity_enabled: bool = False,
+        render_markdown: bool = False,
     ) -> None:
         super().__init__()
         self.setObjectName("messageCard")
         self.setProperty("draft", draft)
 
         self._activity_enabled = activity_enabled
+        self._render_markdown = render_markdown
+        self._raw_text = ""
         self._activity_records: dict[str, ActivityRecord] = {}
         self._activity_widgets: dict[str, _ActivityEntryCard] = {}
 
@@ -214,10 +217,24 @@ class _MessageCard(QFrame):
         self.web_badge.hide()
         role_row.addWidget(self.web_badge)
 
-        self.body_label = QLabel(text)
+        self.copy_button = QToolButton()
+        self.copy_button.setObjectName("copyButton")
+        self.copy_button.setText("Copy")
+        self.copy_button.setToolTip("Copy full message")
+        self.copy_button.setAccessibleName("Copy full message")
+        self.copy_button.setAutoRaise(True)
+        self.copy_button.setEnabled(False)
+        self.copy_button.clicked.connect(self._copy_text)
+        role_row.addWidget(self.copy_button)
+
+        self.body_label = QLabel()
         self.body_label.setObjectName("messageBody")
         self.body_label.setWordWrap(True)
-        self.body_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.body_label.setTextFormat(
+            Qt.TextFormat.MarkdownText
+            if self._render_markdown
+            else Qt.TextFormat.PlainText
+        )
         self.body_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
@@ -225,6 +242,7 @@ class _MessageCard(QFrame):
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Minimum,
         )
+        self.set_text(text)
 
         self.thinking_wave = _ThinkingWave()
 
@@ -252,11 +270,21 @@ class _MessageCard(QFrame):
             layout.addWidget(self.activity_panel)
 
     def set_text(self, text: str) -> None:
+        self._raw_text = text
         self.body_label.setText(text)
+        self.copy_button.setEnabled(bool(text))
 
     def append_text(self, text: str) -> None:
         if text:
-            self.body_label.setText(self.body_label.text() + text)
+            self._raw_text += text
+            self.body_label.setText(self._raw_text)
+            self.copy_button.setEnabled(True)
+
+    @Slot()
+    def _copy_text(self) -> None:
+        if not self._raw_text:
+            return
+        QApplication.clipboard().setText(self._raw_text)
 
     def start_thinking(self) -> None:
         self.thinking_wave.start()
@@ -746,6 +774,21 @@ class DexterOverlay(QWidget):
                 border-color: rgba(235, 105, 105, 58);
                 color: rgba(255, 190, 190, 215);
             }
+            QToolButton#copyButton {
+                background: transparent;
+                border: none;
+                border-radius: 4px;
+                color: rgba(255, 255, 255, 105);
+                font-size: 9px;
+                padding: 1px 4px;
+            }
+            QToolButton#copyButton:hover {
+                background-color: rgba(255, 255, 255, 20);
+                color: rgba(255, 255, 255, 220);
+            }
+            QToolButton#copyButton:disabled {
+                color: rgba(255, 255, 255, 35);
+            }
             QLabel#messageBody {
                 font-size: 13px;
                 color: rgba(255, 255, 255, 238);
@@ -966,6 +1009,7 @@ class DexterOverlay(QWidget):
             "Dexter",
             "",
             activity_enabled=True,
+            render_markdown=True,
         )
         self._insert_card(self._assistant_card)
         self._assistant_card.start_thinking()
@@ -1075,7 +1119,11 @@ class DexterOverlay(QWidget):
         self._scroll_to_bottom()
 
     def _insert_card(self, card: _MessageCard) -> None:
-        self.history_layout.addWidget(card)
+        # Keep the one expanding stretch as the final layout item so short
+        # conversations remain top-aligned. Appending cards after that stretch
+        # creates expandable blank space above the transcript.
+        stretch_index = max(0, self.history_layout.count() - 1)
+        self.history_layout.insertWidget(stretch_index, card)
 
     def _remove_card(self, card: _MessageCard) -> None:
         self.history_layout.removeWidget(card)

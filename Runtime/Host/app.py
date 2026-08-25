@@ -497,13 +497,14 @@ class DexterHost:
 
     @Slot(str)
     def _on_response_text(self, text: str) -> None:
-        self.summon_overlay()
+        # Response start summons Dexter once. Streaming chunks must not force a
+        # window that the user deliberately hid back on screen.
         self.overlay.append_assistant_text(text)
         self.speech.add_text(text)
 
     @Slot(object)
     def _on_activity(self, update) -> None:
-        self.summon_overlay()
+        # Tool/reasoning updates follow the same visibility rule as text chunks.
         self.overlay.add_assistant_activity(update)
 
     @Slot(str)
