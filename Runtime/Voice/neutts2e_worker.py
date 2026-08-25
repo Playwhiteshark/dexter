@@ -19,7 +19,17 @@ import sys
 import threading
 import time
 import traceback
+from pathlib import Path
 from typing import Any
+
+# The Host/runtime helpers launch this worker by file path. In that execution
+# mode Python puts Runtime/Voice (not the repository root) on sys.path, which
+# would make production package imports such as Runtime.Voice.* fail. Bootstrap
+# the repo root once so direct-script and package execution behave identically.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+_repo_root_text = str(REPO_ROOT)
+if _repo_root_text not in sys.path:
+    sys.path.insert(0, _repo_root_text)
 
 MODEL_REPOS = {
     "q8": "neuphonic/neutts-2e-q8-gguf",
