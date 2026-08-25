@@ -67,6 +67,22 @@ NeuTTS-2E accepts raw written text rather than phonemes/SSML. Compact raw-text T
 
 Utterwise is pinned to the exact **0.1.0** core used during evaluation. Its core is pure Python and declares no runtime dependency stack. There is no extra model, phonemizer, service or background process for normalization.
 
+## Voice off / resource release
+
+Voice output is a **resource mode**, not a volume mute. The header overflow menu contains a checkable `Voice output` command rather than an easy-to-hit speaker button because disabling it has a meaningful reverse cost: Paul must warm again before speech is available.
+
+When Voice output is turned off:
+
+1. audible and queued TTS is invalidated immediately;
+2. streamed response text stops entering the speech path and remains visual-only;
+3. `SpeechOutputService` stops the active `VoiceOutput` off the Qt thread;
+4. the NeuTTS child process is shut down, releasing the model-owned Arc/CPU/RAM resources;
+5. the UI changes from `stopping…` to off only after shutdown completes.
+
+Turning Voice output back on creates a **fresh `VoiceOutput` and NeuTTS worker** and performs the normal asynchronous warm-up. Dexter/Goose/STT remain usable while Voice is off or warming. Voice can be turned back off during warm-up, which cancels that startup rather than forcing the user to wait for it to finish.
+
+The preference is persisted with Qt `QSettings`. If Voice was deliberately left off, the next Dexter launch skips the TTS warm-up entirely. A transient TTS startup failure does not overwrite the preference; the menu exposes a retry state instead.
+
 ## Pipelined Perth integration
 
 `neutts2e_pipelined_stream.py` mirrors NeuTTS 1.4.1's private GGUF streaming method but changes scheduling only:
@@ -119,13 +135,13 @@ Run the production Paul streaming/cancellation test:
 uv run python Runtime\Voice\neutts2e_runtime.py smoke
 ```
 
-For a live timing diagnosis, set `DEXTER_TTS_TRACE=1` before launching the Host. The `synthesis_request` trace now reports the **post-normalization text actually sent to NeuTTS**.
+For a live timing diagnosis, set `DEXTER_TTS_TRACE=1` before launching the Host. The `synthesis_request` trace reports the **post-normalization text actually sent to NeuTTS**.
 
 ## Live Host behavior
 
-`SpeechOutputService` starts Paul in parallel with Gateway and Moonshine. Responses remain text-only until TTS is ready. A TTS startup failure also leaves the Host running text-only.
+When Voice output is enabled, `SpeechOutputService` starts Paul in parallel with Gateway and Moonshine. Responses remain text-only until TTS is ready. A TTS startup failure also leaves the Host running text-only.
 
-Normal Goose `end_turn` responses flush the final speech fragment. PTT, typed prompts, agent cancellation, chat reset, non-normal response termination, Gateway/Goose failure, and Host shutdown interrupt audible and queued TTS. PTT therefore acts as a hard barge-in boundary before a new voice capture begins.
+Normal Goose `end_turn` responses flush the final speech fragment. PTT, typed prompts, agent cancellation, chat reset, non-normal response termination, Gateway/Goose failure, Voice-off, and Host shutdown interrupt audible and queued TTS. PTT therefore acts as a hard barge-in boundary before a new voice capture begins.
 
 Run Dexter from the root environment with:
 
@@ -138,11 +154,12 @@ uv run python -m Runtime.Host.app
 - `tts.py` — engine-independent sentence buffering, formatting, playback queue, and interruption.
 - `text_normalization.py` — tiny production speech-text normalizer/backend wrapper.
 - `buffered_audio_sink.py` — callback-driven PortAudio playback with a small jitter reserve.
-- `output_service.py` — Host-facing async startup/degraded-mode/response lifecycle.
+- `output_service.py` — restartable Host-facing Voice lifecycle; async warm-up, disable/unload, degraded mode and response gating.
 - `neutts2e_backend.py` — `SpeechBackend` adapter and production Arc/pipeline runtime defaults.
-- `neutts2e_worker.py` — persistent NeuTTS-2E / Paul child process.
+- `neutts2e_worker.py` — persistent NeuTTS-2E / Paul child process while Voice is enabled.
 - `neutts2e_pipelined_stream.py` — validated Arc-generation / CPU-Perth pipeline and hybrid streaming windows.
 - `neutts2e_runtime.py` — auth migration, runtime doctor, streaming smoke test, and cancellation test.
 - `tts_trace.py` — opt-in live latency/underflow tracing.
+- `../Host/voice_output_control.py` — secondary overflow UI for the expensive Voice resource toggle.
 
 The retired model-comparison harness is documented in `Development/Archive/TTS_SELECTION_2026-08-20.md`; completed experimental scripts remain recoverable through Git history rather than living in the active tree.
