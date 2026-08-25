@@ -15,6 +15,11 @@ If Not fso.FileExists(pythonw) Then
     WScript.Quit 1
 End If
 
+' Keep the normal shortcut on the validated production TTS variant. The
+' backend preserves inherited developer/user overrides, so setting this here
+' also fixes the hidden-launch path that otherwise still defaulted to Q8.
+shell.Environment("PROCESS")("DEXTER_TTS_VARIANT") = "q4"
+
 shell.CurrentDirectory = repoRoot
 command = Chr(34) & pythonw & Chr(34) & " -m Runtime.Host.app"
 
