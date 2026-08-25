@@ -572,7 +572,7 @@ class DexterOverlay(QWidget):
         self.history_layout = QVBoxLayout(self.history_widget)
         self.history_layout.setContentsMargins(0, 0, 0, 0)
         self.history_layout.setSpacing(7)
-        self.history_layout.addStretch(1)
+        self.history_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         self.scroll.setWidget(self.history_widget)
         panel_layout.addWidget(self.scroll, 1)
@@ -1119,11 +1119,7 @@ class DexterOverlay(QWidget):
         self._scroll_to_bottom()
 
     def _insert_card(self, card: _MessageCard) -> None:
-        # Keep the one expanding stretch as the final layout item so short
-        # conversations remain top-aligned. Appending cards after that stretch
-        # creates expandable blank space above the transcript.
-        stretch_index = max(0, self.history_layout.count() - 1)
-        self.history_layout.insertWidget(stretch_index, card)
+        self.history_layout.addWidget(card)
 
     def _remove_card(self, card: _MessageCard) -> None:
         self.history_layout.removeWidget(card)
