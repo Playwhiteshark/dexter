@@ -3,7 +3,7 @@
 This module deliberately does not import a TTS model.  It owns the pieces that
 stay the same whichever synthesizer Dexter uses:
 
-* streamed agent text -> latency-aware speech units;
+* streamed agent text -> sentence-sized speech units;
 * deterministic cleanup of Markdown/code/URLs for listening;
 * one synthesis worker and one playback worker so generation can stay ahead of
   playback without blocking Qt/Goose;
@@ -31,7 +31,6 @@ import numpy as np
 LOGGER = logging.getLogger(__name__)
 
 _SENTENCE_END_RE = re.compile(r'''[.!?](?:["')\]]*)\s+''')
-_STARTUP_CLAUSE_END_RE = re.compile(r'''(?:[,;:](?:["')\]]*)\s+|[—–]\s+)''')
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((?:[^()]+|\([^)]*\))*\)")
 _RAW_URL_RE = re.compile(r"\b(?:https?://|www\.)\S+", re.IGNORECASE)
 _HEADING_RE = re.compile(r"(?m)^\s{0,3}#{1,6}\s+")
@@ -95,38 +94,19 @@ class AudioSink(Protocol):
 class SpeechTextBuffer:
     """Turn arbitrary streamed text fragments into bounded speech units.
 
-    Completed sentence punctuation is always preferred.  Before the first unit
-    has been emitted, Dexter may start at a natural clause boundary once enough
-    text exists, or at a short soft limit when the model produces no useful
-    punctuation.  This is intentionally a one-shot latency optimization: after
-    speech has started, normal sentence-sized buffering resumes so a streamed
-    response does not become a sequence of tiny independent TTS requests.
+    Sentence punctuation is preferred.  Long punctuation-free output is split
+    on a newline/whitespace boundary so a pathological model response cannot
+    delay speech indefinitely.
     """
 
-    def __init__(
-        self,
-        *,
-        max_chars: int = 320,
-        startup_min_chars: int = 40,
-        startup_max_chars: int = 72,
-    ) -> None:
+    def __init__(self, *, max_chars: int = 320) -> None:
         if max_chars < 80:
             raise ValueError("max_chars must be at least 80")
-        if startup_min_chars < 20:
-            raise ValueError("startup_min_chars must be at least 20")
-        if startup_max_chars < startup_min_chars:
-            raise ValueError("startup_max_chars must not be below startup_min_chars")
-        if startup_max_chars >= max_chars:
-            raise ValueError("startup_max_chars must be below max_chars")
         self.max_chars = max_chars
-        self.startup_min_chars = startup_min_chars
-        self.startup_max_chars = startup_max_chars
         self._buffer = ""
-        self._emitted_any = False
 
     def reset(self) -> None:
         self._buffer = ""
-        self._emitted_any = False
 
     def feed(self, text: str) -> list[str]:
         if not text:
@@ -140,16 +120,7 @@ class SpeechTextBuffer:
                 end = match.end()
                 ready.append(self._buffer[:end].strip())
                 self._buffer = self._buffer[end:]
-                self._emitted_any = True
                 continue
-
-            if not self._emitted_any:
-                split_at = self._startup_split_index()
-                if split_at is not None:
-                    ready.append(self._buffer[:split_at].strip())
-                    self._buffer = self._buffer[split_at:].lstrip()
-                    self._emitted_any = True
-                    continue
 
             if len(self._buffer) <= self.max_chars:
                 break
@@ -157,7 +128,6 @@ class SpeechTextBuffer:
             split_at = self._soft_split_index(self._buffer, self.max_chars)
             ready.append(self._buffer[:split_at].strip())
             self._buffer = self._buffer[split_at:].lstrip()
-            self._emitted_any = True
 
         return [item for item in ready if item]
 
@@ -165,15 +135,6 @@ class SpeechTextBuffer:
         tail = self._buffer.strip()
         self._buffer = ""
         return [tail] if tail else []
-
-    def _startup_split_index(self) -> int | None:
-        for match in _STARTUP_CLAUSE_END_RE.finditer(self._buffer):
-            if match.end() >= self.startup_min_chars:
-                return match.end()
-
-        if len(self._buffer) < self.startup_max_chars:
-            return None
-        return self._soft_split_index(self._buffer, self.startup_max_chars)
 
     @staticmethod
     def _soft_split_index(text: str, limit: int) -> int:
