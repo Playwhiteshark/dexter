@@ -294,7 +294,10 @@ class VoiceOutput:
 
     Public methods are cheap enough for Qt callbacks.  Synthesis and playback
     happen on separate workers, allowing sentence N+1 to synthesize while
-    sentence N is still playing.
+    sentence N is still playing. If several complete sentence units are already
+    queued when a synthesis request finishes, a small number are coalesced into
+    the next request. This preserves first-sentence latency while avoiding a new
+    NeuTTS prompt-prefill/TTFA penalty at every sentence boundary.
     """
 
     def __init__(
@@ -305,11 +308,15 @@ class VoiceOutput:
         max_text_queue: int = 16,
         max_audio_queue: int = 4,
         max_buffer_chars: int = 320,
+        max_coalesced_units: int = 3,
     ) -> None:
+        if max_coalesced_units < 1:
+            raise ValueError("max_coalesced_units must be positive")
         self.backend = backend
         self.sink = sink or SoundDeviceAudioSink()
         self.buffer = SpeechTextBuffer(max_chars=max_buffer_chars)
         self.formatter = SpeechFormatter()
+        self.max_coalesced_units = int(max_coalesced_units)
 
         self._text_queue: queue.Queue[object] = queue.Queue(maxsize=max_text_queue)
         self._audio_queue: queue.Queue[object] = queue.Queue(maxsize=max_audio_queue)
@@ -449,6 +456,31 @@ class VoiceOutput:
             LOGGER.warning("TTS text queue full; dropping speech unit: %r", spoken[:80])
             cancel_event.set()
 
+    def _coalesce_available_units(self, first: _SpeechUnit) -> _SpeechUnit:
+        """Merge a few already-queued same-response sentences without waiting."""
+        parts = [first.text]
+        for _ in range(self.max_coalesced_units - 1):
+            try:
+                next_item = self._text_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            if next_item is _STOP:
+                self._text_queue.put_nowait(_STOP)
+                break
+            assert isinstance(next_item, _SpeechUnit)
+            if next_item.response_id != first.response_id:
+                # begin_response()/interrupt() normally drains the old response
+                # before a new one can enqueue. Preserve the unexpected item if
+                # that invariant is ever relaxed.
+                self._text_queue.put_nowait(next_item)
+                break
+            parts.append(next_item.text)
+
+        if len(parts) == 1:
+            return first
+        return _SpeechUnit(first.response_id, " ".join(parts))
+
     def _synthesis_loop(self) -> None:
         try:
             while not self._stop_event.is_set():
@@ -462,6 +494,8 @@ class VoiceOutput:
                     cancel_event = self._cancel_event
                 if item.response_id != current_id or cancel_event.is_set():
                     continue
+
+                item = self._coalesce_available_units(item)
 
                 with self._lock:
                     self._state = VoiceOutputState.SPEAKING
