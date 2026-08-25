@@ -6,11 +6,12 @@ GGUF backbone on Intel Arc while codec/watermark work remains on CPU, so these
 independent stages can overlap without changing the generated token sequence,
 watermarking, or output ordering.
 
-Dexter keeps NeuTTS's 25-frame first window for low startup latency, then uses a
-larger steady-state window (50 frames by default) so codec/Perth overhead is paid
-less often once speech has begun. ``DEXTER_TTS_STEADY_STREAM_FRAMES`` can
-explicitly override that steady-state size; setting it to 25 restores uniform
-upstream-sized windows.
+Dexter normally keeps NeuTTS's 25-frame first window for low startup latency,
+then uses a larger steady-state window (50 frames by default) so codec/Perth
+overhead is paid less often once speech has begun. ``DEXTER_TTS_FIRST_STREAM_FRAMES``
+can override the first window for live diagnostics, while
+``DEXTER_TTS_STEADY_STREAM_FRAMES`` overrides the steady-state size. Setting
+both to 50 produces uniform 50-frame / 1.0-second windows.
 
 This module mirrors the pinned NeuTTS 1.4.1 private streaming method. Keep the
 NeuTTS dependency pinned while this integration exists and revalidate the
@@ -52,6 +53,20 @@ def _frame_weight(frame: np.ndarray) -> np.ndarray:
     return 0.5 - np.abs(t - 0.5)
 
 
+def _first_stream_frames(default_frames: int) -> int:
+    raw = os.environ.get(
+        "DEXTER_TTS_FIRST_STREAM_FRAMES",
+        str(default_frames),
+    ).strip()
+    try:
+        frames = int(raw)
+    except ValueError as exc:
+        raise RuntimeError("DEXTER_TTS_FIRST_STREAM_FRAMES must be an integer") from exc
+    if frames < 10 or frames > 100:
+        raise RuntimeError("DEXTER_TTS_FIRST_STREAM_FRAMES must be between 10 and 100")
+    return frames
+
+
 def _steady_stream_frames(first_frames: int) -> int:
     raw = os.environ.get("DEXTER_TTS_STEADY_STREAM_FRAMES", "50").strip()
     try:
@@ -76,8 +91,8 @@ def _incremental_overlap_segment(
     ``previous_stride`` is the distance from the previous frame's origin to the
     current frame's origin. ``emit_samples`` is the distance from the current
     frame's origin to the next regular frame's origin. Keeping those separate is
-    what lets Dexter use a 25-frame first window followed by larger steady-state
-    windows without changing the overlap math.
+    what lets Dexter use different first and steady-state window sizes without
+    changing the overlap math.
 
     With NeuTTS's current window geometry, the not-yet-emitted region can depend
     only on the current frame and the immediately preceding frame. This is
@@ -143,7 +158,7 @@ def _pipelined_infer_stream_ggml(
     prompt = self._ggml_prompt(ref_codes, ref_text, input_text, emotion)
     self.backbone.reset()
 
-    first_frames = int(self.streaming_frames_per_chunk)
+    first_frames = _first_stream_frames(int(self.streaming_frames_per_chunk))
     steady_frames = _steady_stream_frames(first_frames)
 
     # Two pending windows are enough to keep Arc generation ahead without
