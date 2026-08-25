@@ -17,7 +17,7 @@ The priority is **interactive performance first**, then idle-memory efficiency. 
 
 - **Ollama model runner** — main Gemma model, primarily RTX/CUDA.
 - **Dexter Host** — Qt UI plus one persistent Moonshine `Transcriber`.
-- **NeuTTS worker** — one Host-owned child process using the same root uv/Python 3.13 environment as the Host.
+- **NeuTTS worker** — one Host-owned child process using the same root uv/Python 3.13 environment as the Host **only while Voice output is enabled/warming**.
 - **Gateway** — Host-owned Python HTTP proxy in front of Ollama.
 - **Goose ACP** — separate agent process.
 - **Dexter MCP tools** — separate Python service with its own dependency environment.
@@ -84,6 +84,21 @@ NeuTTS-2E accepts raw written text rather than SSML/phoneme overrides. Productio
 
 There is no extra model, phonemizer, service, worker process, or persistent background component for this layer.
 
+### Voice-off resource mode
+
+Voice output is now a persistent resource mode rather than a volume mute. The secondary header overflow menu can fully disable TTS.
+
+When disabled, `SpeechOutputService` immediately stops routing response text to speech and asynchronously stops the active `VoiceOutput`. The NeuTTS child process is shut down, so its model-owned Arc/CPU/RAM allocations are released. Re-enable creates a fresh output/worker and performs the normal warm-up; Dexter/Goose/STT stay usable while that happens.
+
+The setting persists. If Voice was left off, the next Dexter launch does not start the NeuTTS worker at all. Warm-up can also be cancelled by turning Voice off while it is still starting. The UI does not expose OFF until the retired startup/shutdown path has completed, preventing old and new TTS workers from overlapping.
+
+This creates two useful measurement baselines:
+
+1. **Voice ON / ready** — full production Dexter with the NeuTTS worker resident.
+2. **Voice OFF** — identical Dexter session after the worker/model has been unloaded.
+
+The delta between those captures is now the cleanest way to measure TTS's real resident RAM/CPU/Arc cost instead of inferring it from process names.
+
 ## NPU
 
 Intel AI Boost remains available for future OpenVINO experiments, but availability alone is not a reason to move a workload. The current NeuTTS backbone is a llama.cpp/Vulkan workload, while the ONNX codec is already a minority of TTS cost. NPU work should wait for a model/operator combination where the expected gain is material.
@@ -112,6 +127,8 @@ while Dexter is already running, and send one representative prompt during the c
 
 The profiler records CPU/OS/hardware, process command lines/interpreters, private memory and working set, sampled CPU utilization, visible GPU-engine activity when Windows counters provide it, and an ignored JSON report for before/after comparisons.
 
+For the next memory pass, capture once with **Voice ready**, then turn Voice off and wait until the menu reports it off / the console reports model resources released, and capture again under otherwise comparable idle conditions. That isolates the TTS resident-cost delta before changing any other subsystem.
+
 For the production voice path specifically:
 
 ```bat
@@ -123,9 +140,9 @@ Set `DEXTER_TTS_TRACE=1` only when diagnosing live first-audio/underflow behavio
 
 ## Optimization order
 
-1. Run a fresh full-app performance audit with the current hybrid-window/normalized TTS path.
+1. Measure current full-app **Voice ON vs Voice OFF** RAM/CPU/GPU residency now that TTS can be cleanly unloaded.
 2. Measure and reduce MCP idle memory through lazy imports.
 3. Re-profile Host/STT memory and latency after MCP work.
 4. Audit the main LLM's RTX/host-RAM split separately; do not mix that experiment with voice changes.
-5. Test NPU-suitable OpenVINO workloads only when a specific graph has plausible operator coverage and meaningful expected benefit.
+5. Test NPU/Arc alternatives only when a specific workload/build has plausible operator coverage and a controlled benchmark plan.
 6. After interactive performance is stable, do the broader idle-memory/efficiency pass.
