@@ -96,6 +96,7 @@ class TracingSpeechBackend:
 
     def start(self) -> None:
         self.inner.start()
+        event("backend_ready", info=getattr(self.inner, "ready_info", None))
 
     def synthesize(
         self,
@@ -112,6 +113,7 @@ class TracingSpeechBackend:
         )
         first = True
         chunks = 0
+        audio_seconds_total = 0.0
         started = time.perf_counter()
         previous_pcm_at: float | None = None
         try:
@@ -119,6 +121,7 @@ class TracingSpeechBackend:
                 now = time.perf_counter()
                 chunks += 1
                 audio_seconds = len(chunk.samples) / chunk.sample_rate
+                audio_seconds_total += audio_seconds
                 gap_seconds = (
                     None if previous_pcm_at is None else now - previous_pcm_at
                 )
@@ -143,13 +146,41 @@ class TracingSpeechBackend:
                 )
                 yield chunk
         finally:
+            elapsed = time.perf_counter() - started
             event(
                 "synthesis_done",
                 request=request,
-                after_s=round(time.perf_counter() - started, 3),
+                after_s=round(elapsed, 3),
                 chunks=chunks,
+                audio_s=round(audio_seconds_total, 3),
+                rtf=(
+                    None
+                    if audio_seconds_total <= 0
+                    else round(elapsed / audio_seconds_total, 3)
+                ),
                 cancelled=cancel_event.is_set(),
             )
+            stats = getattr(self.inner, "last_synthesis_stats", None)
+            if isinstance(stats, dict):
+                profile_fields = {
+                    key: stats.get(key)
+                    for key in (
+                        "generation_seconds",
+                        "first_audio_seconds",
+                        "decode_seconds",
+                        "decode_calls",
+                        "eval_seconds",
+                        "eval_calls",
+                        "sample_seconds",
+                        "sample_calls",
+                        "tokenize_seconds",
+                        "tokenize_calls",
+                        "detokenize_seconds",
+                        "detokenize_calls",
+                    )
+                    if stats.get(key) is not None
+                }
+                event("synthesis_profile", request=request, **profile_fields)
 
     def stop(self) -> None:
         self.inner.stop()
