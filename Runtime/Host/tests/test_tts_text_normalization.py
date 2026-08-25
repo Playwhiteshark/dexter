@@ -38,6 +38,16 @@ class SpeechTextNormalizerTests(unittest.TestCase):
         spoken = self.normalizer.normalize("Wait; AI is ready, right? Yes: it is!")
         self.assertEqual(spoken, "Wait; A I is ready, right? Yes: it is!")
 
+    def test_double_quotation_marks_are_removed_but_sentence_punctuation_remains(self) -> None:
+        spoken = self.normalizer.normalize(
+            'She said, “use JSON”; then asked, "is AI ready?"'
+        )
+        self.assertEqual(
+            spoken,
+            "She said, use jay son; then asked, is A I ready?",
+        )
+        self.assertNotRegex(spoken, r'["“”„‟«»]')
+
     def test_semantic_numbers_dates_and_percentages_still_normalize(self) -> None:
         spoken = self.normalizer.normalize(
             "On 2026-04-03, GPU usage reached 81%."
@@ -45,6 +55,21 @@ class SpeechTextNormalizerTests(unittest.TestCase):
         self.assertIn("third of April twenty twenty six", spoken)
         self.assertIn("G P U usage reached eighty one percent", spoken)
         self.assertTrue(spoken.endswith("."))
+
+    def test_decimal_is_fully_verbalized_before_neutts(self) -> None:
+        spoken = self.normalizer.normalize(
+            "Alternatively, you can just multiply 200 by 0.2 to get the same result."
+        )
+        self.assertEqual(
+            spoken,
+            "Alternatively, you can just multiply two hundred by zero point two to get the same result.",
+        )
+
+    def test_point_zero_decimals_are_fully_verbalized_before_neutts(self) -> None:
+        self.assertEqual(
+            self.normalizer.normalize("10.0, 42.0, and 87.0."),
+            "ten point zero, forty two point zero, and eighty seven point zero.",
+        )
 
 
 class _FakeBackend:
