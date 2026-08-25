@@ -73,11 +73,16 @@ _WORD_HYPHEN_RE = re.compile(
     r"(?<=[A-Za-z])-(?=[A-Za-z0-9])|(?<=[A-Za-z0-9])-(?=[A-Za-z])"
 )
 
-# These are deliberately application policy, not an attempt to maintain an
-# English pronunciation dictionary. Generic acronyms remain Utterwise's job.
+# Keep overrides extremely small. Utterwise's generic spaced-letter rendering
+# is useful for technical initialisms such as SQL/CPU/GPU. The exceptions below
+# are cases where NeuTTS itself has demonstrated ambiguity or where the desired
+# spoken form is intentionally word-like.
 PRONUNCIATION_OVERRIDES = {
+    # A bare "A" can be read as the English article ("uh") rather than the
+    # letter name, so spell AI with unambiguous ordinary words.
+    "AI": "ay eye",
+    # User preference and common technical pronunciation.
     "JSON": "jay son",
-    "SQL": "ess cue ell",
 }
 
 # Utterwise's plain formatter intentionally discards punctuation. NeuTTS-2E
@@ -195,14 +200,16 @@ def critical_checks(outputs: dict[str, str]) -> list[tuple[str, bool, str]]:
     punctuation = outputs["Wait; AI is ready, right? Yes: it is."]
     negative = outputs["It is -3°C; that's cold."]
     return [
-        ("AI is expanded", "A I" in ai.upper(), ai),
+        ("AI uses unambiguous letter names", "ay eye" in ai.lower(), ai),
         ("JSON uses preferred pronunciation", "jay son" in json_text.lower(), json_text),
         (
             "CPU/GPU are expanded",
             "C P U" in technical.upper() and "G P U" in technical.upper(),
             technical,
         ),
-        ("SQL is spelled, not sequel", "ess cue ell" in sql_text.lower(), sql_text),
+        # Do not override SQL. The earlier Utterwise form S Q L sounded correct,
+        # while the custom 'ess cue ell' spelling introduced a NeuTTS artifact.
+        ("SQL remains generic spaced letters", "S Q L" in sql_text.upper(), sql_text),
         ("single-underscore emphasis is gone", "_" not in markup, markup),
         (
             "snake_case becomes words",
