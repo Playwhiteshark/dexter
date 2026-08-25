@@ -16,11 +16,38 @@ uv run python Runtime\Voice\neutts2e_runtime.py doctor
 uv run python Runtime\Voice\neutts2e_runtime.py smoke
 ```
 
-Launch the Host with:
+## Launching Dexter
+
+The canonical development/manual launch is the module entry point from the repository root:
 
 ```bat
-uv run python Runtime\Host\app.py
+uv run python -m Runtime.Host.app
 ```
+
+Using `-m Runtime.Host.app` keeps the launch form aligned with Dexter's package/module imports and the root uv environment. Do not launch an older Host copy or a separate Python environment.
+
+For a normal Windows desktop shortcut, do **not** spawn `uv` on every launch. After `uv sync`, the shortcut can call the already-synced root environment directly:
+
+```text
+Target:   <repo>\.venv\Scripts\pythonw.exe -m Runtime.Host.app
+Start in: <repo>
+```
+
+`pythonw.exe` avoids opening an unnecessary console window while still using the same pinned Python 3.13 environment as `uv run`.
+
+Create or update the current user's Desktop `Dexter.lnk` automatically with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Runtime\Host\configure_shortcut.ps1
+```
+
+To update a shortcut stored somewhere else, pass its path explicitly:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\Runtime\Host\configure_shortcut.ps1 -ShortcutPath "C:\path\to\Dexter.lnk"
+```
+
+The helper sets the target, `-m Runtime.Host.app` arguments, repository working directory, description, and Dexter icon when available. It fails clearly if the root `.venv` has not been created yet.
 
 Do not install Host dependencies from a separate `Runtime/Host/requirements.txt`; the root `pyproject.toml` is the dependency source of truth and `uv.lock` is the reproducible lockfile once generated.
 
