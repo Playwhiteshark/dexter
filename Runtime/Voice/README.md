@@ -21,6 +21,8 @@ Production uses:
 - codec: `neuphonic/neucodec-onnx-decoder-int8` on CPU
 - Perth watermarking: enabled
 - scheduling: Arc token generation is pipelined with CPU codec/watermark work
+- streaming windows: 25 frames for first audio, then 50 frames for steady-state headroom
+- text normalization: `utterwise==0.1.0` plus a very small Dexter pronunciation/markup policy
 - speaker: `paul`
 - emotion: `neutral`
 - sample rate: 24 kHz
@@ -39,14 +41,31 @@ The Intel Arc 140T Vulkan path was then verified from native llama.cpp logs:
 - KV cache on Vulkan0
 - RTX 5050 not used by TTS
 
-Serial Arc + Perth improved the clean benchmark to about **RTF 1.22**, but remained too slow for uninterrupted live playback. Profiling then showed that NeuTTS serialized Arc token generation with CPU Perth watermarking. Pipelining those independent stages while keeping Perth enabled produced the validated result:
+Serial Arc + Perth improved the clean benchmark to about **RTF 1.22**, but remained too slow for uninterrupted live playback. Profiling then showed that NeuTTS serialized Arc token generation with CPU Perth watermarking. Pipelining those independent stages while keeping Perth enabled produced a validated **RTF 0.782** path and removed the original sustained-starvation problem.
 
-- **RTF 0.782**
-- **first audio 0.775 s**
-- average post-first-chunk arrival surplus about **0.123 s per 0.5 s chunk**
-- worst measured steady-state chunk deficit about **+0.004 s**
+A later steady-window benchmark showed that keeping the upstream 25-frame / 0.5 s window forever could still occasionally miss a playback deadline under load:
 
-That is the selected production configuration. The playback layer therefore uses a **0.5 s jitter reserve** rather than the previous 1.0 s starvation-compensation buffer.
+- 25 frames: **RTF 0.805**, worst measured chunk deficit **+0.113 s**
+- 40 frames: **RTF 0.773**, worst measured chunk deficit **-0.008 s**
+- 50 frames: **RTF 0.733**, worst measured chunk deficit **-0.067 s**
+
+Production therefore keeps **25 frames for the first decode** to preserve time-to-first-audio, then switches to **50-frame / 1.0 s steady windows**. This reduces repeated decode/Perth overhead without paying the 50-frame startup penalty. Variable-stride overlap-add is regression-tested against a full-history reference implementation.
+
+The playback layer uses a **0.5 s jitter reserve** rather than the previous 1.0 s starvation-compensation buffer. The 24 kHz mono PortAudio stream is pre-opened during TTS startup and reused, removing the previous roughly one-second first-play device-open penalty. PTT interruption still aborts output and clears buffered PCM immediately.
+
+## Speech text normalization
+
+NeuTTS-2E accepts raw written text rather than phonemes/SSML. Compact raw-text TTS models are unreliable around programmer typography, acronyms and semantic written forms, so production normalizes text immediately before synthesis.
+
+`Runtime/Voice/text_normalization.py` is intentionally thin:
+
+1. existing `SpeechFormatter` removes fenced code, Markdown presentation syntax and raw URLs that should not be read literally;
+2. Dexter converts single-underscore emphasis, `snake_case`, and word-style hyphens to ordinary word boundaries while leaving negatives, dates and numeric hyphens available for semantic parsing;
+3. Utterwise handles acronyms, numbers, dates, versions, percentages, currency, temperatures and similar written forms;
+4. Dexter preserves the source punctuation instead of using Utterwise's punctuation-free plain renderer, because NeuTTS uses punctuation for pauses and sentence prosody;
+5. measured pronunciation policies are deliberately tiny: `AI` becomes `A I`, `JSON` becomes `jay son`, while ordinary acronyms such as `SQL`, `CPU` and `GPU` remain Utterwise's responsibility.
+
+Utterwise is pinned to the exact **0.1.0** core used during evaluation. Its core is pure Python and declares no runtime dependency stack. There is no extra model, phonemizer, service or background process for normalization.
 
 ## Pipelined Perth integration
 
@@ -100,6 +119,8 @@ Run the production Paul streaming/cancellation test:
 uv run python Runtime\Voice\neutts2e_runtime.py smoke
 ```
 
+For a live timing diagnosis, set `DEXTER_TTS_TRACE=1` before launching the Host. The `synthesis_request` trace now reports the **post-normalization text actually sent to NeuTTS**.
+
 ## Live Host behavior
 
 `SpeechOutputService` starts Paul in parallel with Gateway and Moonshine. Responses remain text-only until TTS is ready. A TTS startup failure also leaves the Host running text-only.
@@ -115,11 +136,13 @@ uv run python -m Runtime.Host.app
 ## Files
 
 - `tts.py` — engine-independent sentence buffering, formatting, playback queue, and interruption.
+- `text_normalization.py` — tiny production speech-text normalizer/backend wrapper.
 - `buffered_audio_sink.py` — callback-driven PortAudio playback with a small jitter reserve.
 - `output_service.py` — Host-facing async startup/degraded-mode/response lifecycle.
 - `neutts2e_backend.py` — `SpeechBackend` adapter and production Arc/pipeline runtime defaults.
 - `neutts2e_worker.py` — persistent NeuTTS-2E / Paul child process.
-- `neutts2e_pipelined_stream.py` — validated Arc-generation / CPU-Perth pipeline.
+- `neutts2e_pipelined_stream.py` — validated Arc-generation / CPU-Perth pipeline and hybrid streaming windows.
 - `neutts2e_runtime.py` — auth migration, runtime doctor, streaming smoke test, and cancellation test.
+- `tts_trace.py` — opt-in live latency/underflow tracing.
 
-The retired model-comparison harness is documented in `Development/Archive/TTS_SELECTION_2026-08-20.md` and remains available through Git history.
+The retired model-comparison harness is documented in `Development/Archive/TTS_SELECTION_2026-08-20.md`; completed experimental scripts remain recoverable through Git history rather than living in the active tree.
