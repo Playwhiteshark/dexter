@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import QObject
+from PySide6.QtCore import QObject, Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QFrame, QMenu, QToolButton, QWidget
 
@@ -48,7 +48,11 @@ class VoiceOutputControl(QObject):
 
         self.more_button = QToolButton(header)
         self.more_button.setObjectName("moreButton")
-        self.more_button.setText("⋯")
+        # Use one real centered arrow instead of drawing an ellipsis alongside
+        # QToolButton's automatic menu indicator. The menu-indicator subcontrol
+        # is suppressed below so Qt cannot add a second off-centre arrow.
+        self.more_button.setArrowType(Qt.ArrowType.DownArrow)
+        self.more_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self.more_button.setToolTip("Dexter options")
         self.more_button.setAccessibleName("Dexter options")
         self.more_button.setAutoRaise(True)
@@ -62,8 +66,6 @@ class VoiceOutputControl(QObject):
                 border: none;
                 border-radius: 5px;
                 color: rgba(255, 255, 255, 155);
-                font-size: 15px;
-                font-weight: 600;
                 padding: 0px;
             }
             QToolButton#moreButton:hover {
@@ -72,6 +74,11 @@ class VoiceOutputControl(QObject):
             }
             QToolButton#moreButton:pressed {
                 background-color: rgba(255, 255, 255, 38);
+            }
+            QToolButton#moreButton::menu-indicator {
+                image: none;
+                width: 0px;
+                height: 0px;
             }
             """
         )
