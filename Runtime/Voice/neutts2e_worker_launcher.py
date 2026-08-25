@@ -64,6 +64,34 @@ def main() -> int:
             flush=True,
         )
 
+    # NeuTTS also imports AutoTokenizer/AutoModelForCausalLM unconditionally,
+    # although Dexter's production Q4/GGUF path uses llama.cpp and never touches
+    # either Transformers class. The full Transformers import currently pulls
+    # scikit-learn -> SciPy on the target machine, and Windows Application Control
+    # blocks SciPy's unsigned native extension before Voice can start. Use the
+    # previously validated quantized-only compatibility surface by default. It
+    # fails loudly if a non-GGUF backbone is ever requested. Earlier sustained
+    # Gemma A/B measured a modest ~4% RTF regression versus full Transformers,
+    # but both variants remained faster than realtime; the upstream path is now
+    # not production-viable under the machine's security policy. Keep an explicit
+    # fallback for diagnostics or a future signed dependency stack.
+    lean_transformers = _binary_flag("DEXTER_TTS_LEAN_TRANSFORMERS", True)
+    if lean_transformers:
+        from transformers_quantized_compat import install_as_transformers
+
+        install_as_transformers()
+        print(
+            "[TTS] Transformers path=quantized-compat",
+            file=sys.stderr,
+            flush=True,
+        )
+    else:
+        print(
+            "[TTS] Transformers path=upstream",
+            file=sys.stderr,
+            flush=True,
+        )
+
     # Perth's apply_watermark() uses only the watermark encoder, but upstream
     # Perth also constructs a three-branch detector network used for watermark
     # detection/training. Dexter never performs detection in its speech worker.
