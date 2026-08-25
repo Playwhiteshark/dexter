@@ -35,7 +35,7 @@ MODEL_REPOS = {
     "q8": "neuphonic/neutts-2e-q8-gguf",
     "q4": "neuphonic/neutts-2e-q4-gguf",
 }
-VARIANT = os.environ.get("DEXTER_TTS_VARIANT", "q8").strip().lower()
+VARIANT = os.environ.get("DEXTER_TTS_VARIANT", "q4").strip().lower()
 if VARIANT not in MODEL_REPOS:
     raise SystemExit(
         f"Unsupported DEXTER_TTS_VARIANT={VARIANT!r}; expected one of {sorted(MODEL_REPOS)}"
@@ -63,6 +63,33 @@ if VULKAN_DEVICE:
 PIPELINE_WATERMARK = (
     os.environ.get("DEXTER_TTS_PIPELINE_WATERMARK", "0").strip() == "1"
 )
+
+# NeuCodec's upstream ONNX session leaves ORT's CPU pool at its machine-sized
+# default. On Dexter's 16-core hybrid CPU that pool heavily contends with the
+# Arc/Vulkan TTS backbone while Gemma is generating. Live A/B measurements on
+# the target machine improved fully-concurrent TTS from ~1.26 RTF to ~0.8 RTF
+# by limiting ORT to two intra-op threads and one inter-op thread. ORT 1.29+
+# reads these process defaults when the session is created. Explicit user
+# settings still win because setdefault preserves inherited environment values.
+CODEC_THREADS_RAW = os.environ.get("DEXTER_TTS_CODEC_THREADS", "2").strip()
+try:
+    CODEC_THREADS = int(CODEC_THREADS_RAW)
+except ValueError as exc:
+    raise SystemExit("DEXTER_TTS_CODEC_THREADS must be an integer") from exc
+if CODEC_THREADS < 1:
+    raise SystemExit("DEXTER_TTS_CODEC_THREADS must be positive")
+os.environ.setdefault("ORT_INTRA_OP_NUM_THREADS", str(CODEC_THREADS))
+os.environ.setdefault("ORT_INTER_OP_NUM_THREADS", "1")
+
+# Once synthesis was comfortably faster than realtime, the remaining audible
+# glitch was the 25 -> 50 frame startup transition: only 0.5 s of initial PCM
+# could be exhausted before the first 1.0 s steady chunk arrived. A 40-frame
+# first window gives 0.8 s of initial audio and eliminated the measured startup
+# underflows while adding only ~0.18-0.20 s to first-audio latency. Keep the
+# steady window at 50 frames for throughput. Environment overrides remain
+# available for diagnostics.
+os.environ.setdefault("DEXTER_TTS_FIRST_STREAM_FRAMES", "40")
+os.environ.setdefault("DEXTER_TTS_STEADY_STREAM_FRAMES", "50")
 
 THREAD_OVERRIDE_RAW = os.environ.get("DEXTER_TTS_THREADS", "").strip()
 THREAD_OVERRIDE: int | None = None
@@ -291,6 +318,10 @@ def main() -> int:
             "vulkan_device": VULKAN_DEVICE or None,
             "pipeline_watermark": PIPELINE_WATERMARK,
             "actual_threads": actual_threads,
+            "codec_ort_intra_threads": os.environ.get("ORT_INTRA_OP_NUM_THREADS"),
+            "codec_ort_inter_threads": os.environ.get("ORT_INTER_OP_NUM_THREADS"),
+            "first_stream_frames": os.environ.get("DEXTER_TTS_FIRST_STREAM_FRAMES"),
+            "steady_stream_frames": os.environ.get("DEXTER_TTS_STEADY_STREAM_FRAMES"),
             "gpu_offload_supported": gpu_offload_supported,
             "requested_gpu_layers": requested_gpu_layers,
         }
