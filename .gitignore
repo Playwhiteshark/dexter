@@ -22,6 +22,10 @@
 **/_dexter_tool_tests/
 **/benchmark_runs/
 
+# Retired local TTS comparison bench. The selected model/path is now production
+# code; historical selection notes remain in Development/Archive and Git history.
+/Development/TTSBench/
+
 # ============================================================
 # Existing Goose generated runs
 # Keep harness source code/configs; ignore run artifacts.
