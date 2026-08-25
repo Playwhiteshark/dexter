@@ -15,6 +15,14 @@ dependencies = [
   "gguf",
 ]
 
+# Evaluation-only text-normalization tooling. This is intentionally not part of
+# Dexter's production dependency set until it earns promotion in diagnostics.
+# Utterwise core is pure Python and declares zero runtime dependencies.
+[dependency-groups]
+tts-normalization-eval = [
+  "utterwise==0.1.0",
+]
+
 [tool.uv]
 package = false
 environments = [
