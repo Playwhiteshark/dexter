@@ -15,7 +15,7 @@ import numpy as np
 from Runtime.Voice.tts import AudioChunk
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-WORKER_PATH = Path(__file__).resolve().parent / "neutts2e_worker.py"
+WORKER_PATH = Path(__file__).resolve().parent / "neutts2e_worker_launcher.py"
 RUNTIME_ROOT = Path(
     os.environ.get("LOCALAPPDATA") or os.environ.get("TEMP") or str(REPO_ROOT)
 ) / "Dexter" / "Voice" / "neutts2e"
@@ -66,11 +66,16 @@ class NeuTTS2EBackend:
         # Q4 backbone -> Intel Arc 140T Vulkan0; ONNX codec + Perth -> CPU.
         # GGUF generation and CPU post-processing are pipelined so Perth remains
         # enabled without forcing the two independent devices to run serially.
+        # 128/128 llama.cpp batch/ubatch reduced the backbone by ~325 MB working
+        # set / ~644 MB private versus upstream 512/512 while sustained Gemma +
+        # TTS remained faster than realtime (RTF 0.794 vs 0.807 at 512).
         # Preserve explicit developer overrides when troubleshooting.
         env.setdefault("DEXTER_TTS_VARIANT", "q4")
         env.setdefault("DEXTER_TTS_BACKBONE_DEVICE", "gpu")
         env.setdefault("DEXTER_TTS_VULKAN_DEVICE", "0")
         env.setdefault("DEXTER_TTS_PIPELINE_WATERMARK", "1")
+        env.setdefault("DEXTER_TTS_BACKBONE_BATCH", "128")
+        env.setdefault("DEXTER_TTS_BACKBONE_UBATCH", "128")
         env.setdefault("GGML_VK_VISIBLE_DEVICES", env["DEXTER_TTS_VULKAN_DEVICE"])
         return env
 
@@ -85,7 +90,7 @@ class NeuTTS2EBackend:
                 "Run Dexter with `uv run`, after `uv sync`."
             )
         if not WORKER_PATH.exists():
-            raise RuntimeError(f"Missing NeuTTS-2E worker: {WORKER_PATH}")
+            raise RuntimeError(f"Missing NeuTTS-2E worker launcher: {WORKER_PATH}")
 
         # Start the latency-sensitive worker at AboveNormal directly. This is
         # more reliable on Windows than changing priority from Python after
@@ -94,6 +99,7 @@ class NeuTTS2EBackend:
         creationflags = (
             subprocess.ABOVE_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0
         )
+        worker_env = self.runtime_env()
 
         process = subprocess.Popen(
             [str(python), "-u", str(WORKER_PATH)],
@@ -105,7 +111,7 @@ class NeuTTS2EBackend:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
-            env=self.runtime_env(),
+            env=worker_env,
             creationflags=creationflags,
         )
         self._process = process
@@ -116,6 +122,11 @@ class NeuTTS2EBackend:
             if message.get("type") == "fatal":
                 raise RuntimeError(f"NeuTTS-2E failed to start: {message.get('message')}")
             raise RuntimeError(f"Unexpected NeuTTS-2E startup message: {message}")
+        # The wrapper owns these llama.cpp constructor settings; surface them in
+        # the same ready-info dictionary used by diagnostics even though the
+        # upstream worker itself does not know about the wrapper.
+        message["backbone_batch"] = worker_env["DEXTER_TTS_BACKBONE_BATCH"]
+        message["backbone_ubatch"] = worker_env["DEXTER_TTS_BACKBONE_UBATCH"]
         self.ready_info = message
         self.last_synthesis_stats = None
 
