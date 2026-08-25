@@ -35,9 +35,14 @@ from typing import Any, Callable
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VOICE_DIR = REPO_ROOT / "Runtime" / "Voice"
 
-# Direct execution of Runtime/Voice/neutts2e_worker.py naturally puts this
-# directory first on sys.path. Reproduce that here so NeuTTS/Perth use Dexter's
-# small SciPy-free librosa compatibility module rather than real librosa.
+# Running a script by path makes its own directory sys.path[0]. Add the repo
+# root explicitly so imports such as Runtime.Voice.* behave like the production
+# module launch. Keep Runtime/Voice before it so NeuTTS/Perth still resolve
+# Dexter's small SciPy-free librosa compatibility module first.
+_repo_text = str(REPO_ROOT)
+if _repo_text in sys.path:
+    sys.path.remove(_repo_text)
+sys.path.insert(0, _repo_text)
 _voice_text = str(VOICE_DIR)
 if _voice_text in sys.path:
     sys.path.remove(_voice_text)
