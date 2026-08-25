@@ -28,6 +28,7 @@ _TRACE_ENABLED = os.environ.get("DEXTER_TTS_TRACE", "0").strip() == "1"
 _TRACE_ORIGIN = time.perf_counter()
 _TRACE_LOCK = threading.Lock()
 _TRACE_STREAM = None
+_TRACE_PATH: Path | None = None
 
 if _TRACE_ENABLED:
     configured_path = os.environ.get("DEXTER_TTS_TRACE_FILE", "").strip()
@@ -40,6 +41,7 @@ if _TRACE_ENABLED:
             or str(Path.cwd())
         )
         trace_path = runtime_root / "Dexter" / "Diagnostics" / "tts-trace.log"
+    _TRACE_PATH = trace_path
     try:
         trace_path.parent.mkdir(parents=True, exist_ok=True)
         _TRACE_STREAM = trace_path.open("w", encoding="utf-8", buffering=1)
@@ -69,6 +71,16 @@ def event(name: str, **fields: object) -> None:
                 print(line, file=_TRACE_STREAM, flush=True)
             except Exception:
                 pass
+
+
+if _TRACE_ENABLED:
+    event(
+        "trace_enabled",
+        pid=os.getpid(),
+        executable=sys.executable,
+        trace_file=str(_TRACE_PATH) if _TRACE_PATH is not None else None,
+        file_open=_TRACE_STREAM is not None,
+    )
 
 
 class TracingSpeechBackend:
