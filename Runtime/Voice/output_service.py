@@ -20,6 +20,11 @@ from Runtime.Voice.tts_trace import (
     TracingSpeechBackend,
     TracingVoiceOutput,
     enabled as tts_trace_enabled,
+    event as tts_trace_event,
+)
+from Runtime.Voice.windows_default_audio_sink import (
+    WindowsDefaultAudioSink,
+    soundcard_available,
 )
 
 ErrorCallback = Callable[[str], None]
@@ -37,11 +42,27 @@ _STOPPING = "stopping"
 _SHUTDOWN = "shutdown"
 
 
+def _production_sink(**sink_kwargs):
+    # sounddevice/PortAudio caches the Windows default endpoint at process
+    # initialization. SoundCard talks to Core Audio/WASAPI directly, so asking
+    # for its default speaker follows headphone/speaker plug-unplug changes
+    # without reinitializing PortAudio and disturbing Moonshine's microphone.
+    if soundcard_available():
+        return WindowsDefaultAudioSink(
+            **sink_kwargs,
+            trace_callback=tts_trace_event if tts_trace_enabled() else None,
+        )
+    if tts_trace_enabled():
+        return TracingBufferedSoundDeviceAudioSink(**sink_kwargs)
+    return BufferedSoundDeviceAudioSink(**sink_kwargs)
+
+
 def _production_output() -> VoiceOutput:
     sink_kwargs = {
         "expected_sample_rate": _NEUTTS_SAMPLE_RATE,
         "expected_channels": _NEUTTS_CHANNELS,
     }
+    sink = _production_sink(**sink_kwargs)
     if tts_trace_enabled():
         # Put normalization outside the tracing backend so synthesis traces show
         # the exact text NeuTTS receives rather than the visible source.
@@ -49,11 +70,11 @@ def _production_output() -> VoiceOutput:
             NormalizingSpeechBackend(
                 TracingSpeechBackend(NeuTTS2EBackend())
             ),
-            sink=TracingBufferedSoundDeviceAudioSink(**sink_kwargs),
+            sink=sink,
         )
     return VoiceOutput(
         NormalizingSpeechBackend(NeuTTS2EBackend()),
-        sink=BufferedSoundDeviceAudioSink(**sink_kwargs),
+        sink=sink,
     )
 
 
