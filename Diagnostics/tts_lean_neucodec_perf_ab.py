@@ -5,6 +5,10 @@ Intel Arc/Vulkan0, llama.cpp batch/ubatch 128/128, ORT 2/1, Perth watermarking,
 40/50 streaming windows, and AboveNormal child priority. The measured take runs
 while gemma4-jarvis:12b is actively generating through Ollama.
 
+The parent runs three fresh-process trials per variant and alternates order so a
+single noisy run or systematic first/second-run bias cannot decide whether the
+lean decoder is worth productionizing.
+
 Run with Dexter fully quit, but leave Ollama running:
 
     uv run python Diagnostics/tts_lean_neucodec_perf_ab.py
@@ -15,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import statistics
 import subprocess
 import sys
 import threading
@@ -247,13 +252,23 @@ def _run(mode: str) -> dict[str, object]:
 
 
 def _parent() -> int:
-    print("Dexter full-pipeline stock-vs-lean NeuCodec A/B")
-    print("Quit Dexter, leave Ollama running. Both runs use production 128/128 and sustained Gemma load.\n")
-    results: list[dict[str, object]] = []
-    for mode in ("stock", "lean"):
-        print(f"Running {mode} ...", flush=True)
+    print("Dexter repeated full-pipeline stock-vs-lean NeuCodec A/B")
+    print(
+        "Quit Dexter, leave Ollama running. Three fresh-process trials per variant; "
+        "order alternates to reduce run-order bias.\n"
+    )
+
+    schedule = [
+        (1, "stock"), (1, "lean"),
+        (2, "lean"), (2, "stock"),
+        (3, "stock"), (3, "lean"),
+    ]
+    results: dict[str, list[dict[str, object]]] = {"stock": [], "lean": []}
+
+    for trial, mode in schedule:
+        print(f"Trial {trial}: running {mode} ...", flush=True)
         result = _run(mode)
-        results.append(result)
+        results[mode].append(result)
         take = result["concurrent"]
         print(
             f"  load={result['load_seconds']:>6.2f}s  "
@@ -261,11 +276,24 @@ def _parent() -> int:
             f"Gemma active through TTS={take['gemma_active_at_tts_end']}"
         )
 
-    stock = results[0]["concurrent"]
-    lean = results[1]["concurrent"]
-    print("\nLean relative to stock (lower is better):")
-    print(f"  dRTF={lean['rtf'] - stock['rtf']:+.3f}")
-    print(f"  dTTFA={lean['first_audio_seconds'] - stock['first_audio_seconds']:+.3f}s")
+    medians: dict[str, dict[str, float]] = {}
+    print("\nMedians across three sustained-contention trials:")
+    for mode in ("stock", "lean"):
+        rtfs = [float(r["concurrent"]["rtf"]) for r in results[mode]]
+        ttfas = [float(r["concurrent"]["first_audio_seconds"]) for r in results[mode]]
+        medians[mode] = {
+            "rtf": statistics.median(rtfs),
+            "ttfa": statistics.median(ttfas),
+        }
+        print(
+            f"  {mode:<5} RTF={medians[mode]['rtf']:.3f}  "
+            f"TTFA={medians[mode]['ttfa']:.3f}s  "
+            f"RTFs={[round(v, 3) for v in rtfs]}"
+        )
+
+    print("\nLean relative to stock median (lower is better):")
+    print(f"  dRTF={medians['lean']['rtf'] - medians['stock']['rtf']:+.3f}")
+    print(f"  dTTFA={medians['lean']['ttfa'] - medians['stock']['ttfa']:+.3f}s")
     return 0
 
 
