@@ -246,7 +246,13 @@ class WindowsDefaultAudioSink:
                         if self._closed:
                             break
                         if self._buffered_frames <= 0:
-                            self._playing = False
+                            # Once playback has actually underflowed, preserve the
+                            # rebuffering state until enough PCM arrives to satisfy
+                            # the rebuffer reserve. Clearing _playing here used to
+                            # route the refill through the startup path instead,
+                            # hiding underflow telemetry and bypassing rebuffering.
+                            if not self._rebuffering:
+                                self._playing = False
                             self._condition.wait(timeout=min(self.device_poll_seconds, 0.05))
                             break
 
