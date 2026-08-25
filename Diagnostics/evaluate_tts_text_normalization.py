@@ -2,7 +2,8 @@ r"""Evaluate a lightweight text-normalization frontend before production wiring.
 
 Live Dexter is unchanged. Utterwise comes from the evaluation-only uv group;
 Dexter contributes only conservative cleanup for single-underscore emphasis,
-snake_case, and word-style hyphens.
+snake_case, word-style hyphens, punctuation-preserving rendering, and a tiny
+application pronunciation-override map.
 
 Text-only:
     uv run --group tts-normalization-eval python Diagnostics\evaluate_tts_text_normalization.py
@@ -22,6 +23,7 @@ import time
 import tracemalloc
 import wave
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -51,12 +53,14 @@ CASES = [
     "Run the SQL query through the API.",
     "Keep x_1 intact as math-like text.",
     "The date is 2026-04-03.",
+    "Wait; AI is ready, right? Yes: it is.",
+    "It is -3°C; that's cold.",
 ]
 
 AUDIO_TEXT = (
-    "AI and JSON are running in real-time. "
+    "AI and JSON are running in real-time; SQL is ready too. "
     "The GPU reads snake_case and _important_ text. "
-    "Python 3.13 is using 81% of the CPU."
+    "Python 3.13 is using 81% of the CPU, which is fairly high."
 )
 
 # Utterwise already handles normal Markdown such as headings, **, __, `, and ~~.
@@ -69,26 +73,98 @@ _WORD_HYPHEN_RE = re.compile(
     r"(?<=[A-Za-z])-(?=[A-Za-z0-9])|(?<=[A-Za-z0-9])-(?=[A-Za-z])"
 )
 
+# These are deliberately application policy, not an attempt to maintain an
+# English pronunciation dictionary. Generic acronyms remain Utterwise's job.
+PRONUNCIATION_OVERRIDES = {
+    "JSON": "jay son",
+    "SQL": "ess cue ell",
+}
+
+# Utterwise's plain formatter intentionally discards punctuation. NeuTTS-2E
+# benefits from normal written punctuation as prosody cues, so retain the basic
+# punctuation that carries sentence structure while still verbalizing semantic
+# tokens such as -3, dates, percentages, and currency through Utterwise.
+_PRESERVED_PUNCTUATION = {
+    ".",
+    ",",
+    "!",
+    "?",
+    ":",
+    ";",
+    "(",
+    ")",
+    "[",
+    "]",
+    "{",
+    "}",
+    '"',
+    "'",
+}
+_CLOSE_PUNCTUATION = re.compile(r"\s+([,.;:!?\)\]\}])")
+_OPEN_PUNCTUATION = re.compile(r"([\(\[\{])\s+")
+
 
 def dexter_preclean(text: str) -> str:
     value = _SINGLE_UNDERSCORE_EMPHASIS_RE.sub(r"\1", text)
     value = _IDENTIFIER_UNDERSCORE_RE.sub(" ", value)
     value = _WORD_HYPHEN_RE.sub(" ", value)
+    # NeuTTS has been unreliable with dash glyphs in assistant prose. Preserve
+    # their pause semantics with a comma; semantic minus signs are untouched.
     value = value.replace("—", ", ").replace("–", ", ")
     return _WHITESPACE_RE.sub(" ", value).strip()
+
+
+def apply_pronunciation_overrides(text: str) -> str:
+    value = text
+    for written, spoken in PRONUNCIATION_OVERRIDES.items():
+        value = re.sub(rf"\b{re.escape(written)}\b", spoken, value)
+    return value
 
 
 def load_utterwise():
     before_modules = set(sys.modules)
     tracemalloc.start()
     started = time.perf_counter()
-    from utterwise import normalize
+    from utterwise.normalizers import Normalizer
 
     import_seconds = time.perf_counter() - started
     current_bytes, peak_bytes = tracemalloc.get_traced_memory()
     tracemalloc.stop()
     module_count = len(set(sys.modules) - before_modules)
-    return normalize, import_seconds, current_bytes, peak_bytes, module_count
+    return Normalizer(), import_seconds, current_bytes, peak_bytes, module_count
+
+
+def normalize_for_neutts(normalizer: Any, text: str) -> str:
+    """Use Utterwise's semantics while retaining NeuTTS-useful punctuation."""
+    prepared = apply_pronunciation_overrides(dexter_preclean(text))
+    result = normalizer.normalize(prepared, output="plain", policy="assistant")
+
+    # Token spans refer to result.cleaned_text after Utterwise's own Markdown
+    # preprocessing. Rebuild from those spans so semantic replacements happen
+    # without throwing away ordinary punctuation or the whitespace between it.
+    cleaned = result.cleaned_text
+    parts: list[str] = []
+    cursor = 0
+    for token, segment in zip(result.tokens, result.segments):
+        start = int(token.start)
+        end = int(token.end)
+        if start > cursor:
+            parts.append(cleaned[cursor:start])
+
+        if token.type == "PUNCTUATION" and token.value in _PRESERVED_PUNCTUATION:
+            parts.append(token.value)
+        elif segment.text:
+            parts.append(segment.text)
+        cursor = end
+
+    if cursor < len(cleaned):
+        parts.append(cleaned[cursor:])
+
+    rendered = "".join(parts)
+    rendered = _WHITESPACE_RE.sub(" ", rendered)
+    rendered = _CLOSE_PUNCTUATION.sub(r"\1", rendered)
+    rendered = _OPEN_PUNCTUATION.sub(r"\1", rendered)
+    return rendered.strip()
 
 
 def distribution_size_bytes() -> int:
@@ -114,15 +190,19 @@ def critical_checks(outputs: dict[str, str]) -> list[tuple[str, bool, str]]:
     markup = outputs["_important_ text should sound normal."]
     snake = outputs["snake_case should become ordinary words."]
     hyphen = outputs["real-time streaming should stay natural."]
+    sql_text = outputs["Run the SQL query through the API."]
     iso_date = outputs["The date is 2026-04-03."]
+    punctuation = outputs["Wait; AI is ready, right? Yes: it is."]
+    negative = outputs["It is -3°C; that's cold."]
     return [
         ("AI is expanded", "A I" in ai.upper(), ai),
-        ("JSON is expanded", "J S O N" in json_text.upper(), json_text),
+        ("JSON uses preferred pronunciation", "jay son" in json_text.lower(), json_text),
         (
             "CPU/GPU are expanded",
             "C P U" in technical.upper() and "G P U" in technical.upper(),
             technical,
         ),
+        ("SQL is spelled, not sequel", "ess cue ell" in sql_text.lower(), sql_text),
         ("single-underscore emphasis is gone", "_" not in markup, markup),
         (
             "snake_case becomes words",
@@ -131,6 +211,16 @@ def critical_checks(outputs: dict[str, str]) -> list[tuple[str, bool, str]]:
         ),
         ("word hyphen becomes a boundary", "real-time" not in hyphen.lower(), hyphen),
         ("ISO date remains semantic", "april" in iso_date.lower(), iso_date),
+        (
+            "basic punctuation survives",
+            all(mark in punctuation for mark in (";", ",", "?", ":", ".")),
+            punctuation,
+        ),
+        (
+            "negative number remains semantic",
+            "minus three" in negative.lower() and ";" in negative,
+            negative,
+        ),
     ]
 
 
@@ -184,7 +274,7 @@ def main() -> int:
     parser.add_argument("--audio", action="store_true")
     args = parser.parse_args()
 
-    normalize, import_s, current_b, peak_b, module_count = load_utterwise()
+    normalizer, import_s, current_b, peak_b, module_count = load_utterwise()
     print("Utterwise evaluation only — live Dexter TTS is unchanged.\n")
     print("FOOTPRINT")
     print(f"  distribution files: {distribution_size_bytes() / 1024:.1f} KiB")
@@ -196,12 +286,12 @@ def main() -> int:
     outputs: dict[str, str] = {}
     print("\nNORMALIZATION CORPUS")
     for index, raw in enumerate(CASES, start=1):
-        cleaned = dexter_preclean(raw)
-        spoken = str(normalize(cleaned))
+        prepared = apply_pronunciation_overrides(dexter_preclean(raw))
+        spoken = normalize_for_neutts(normalizer, raw)
         outputs[raw] = spoken
         print(f"\n[{index:02d}] raw:        {raw}")
-        if cleaned != raw:
-            print(f"     preclean:   {cleaned}")
+        if prepared != raw:
+            print(f"     prepared:   {prepared}")
         print(f"     normalized: {spoken}")
 
     failures = 0
@@ -215,14 +305,14 @@ def main() -> int:
     iterations = 200
     started = time.perf_counter()
     for _ in range(iterations):
-        normalize(dexter_preclean(benchmark_text))
+        normalize_for_neutts(normalizer, benchmark_text)
     elapsed = time.perf_counter() - started
     print("\nTHROUGHPUT")
     print(f"  {iterations} passes: {elapsed:.3f}s")
     print(f"  per pass:         {(elapsed / iterations) * 1000:.3f} ms")
     print(f"  chars/pass:       {len(benchmark_text)}")
 
-    normalized_audio_text = str(normalize(dexter_preclean(AUDIO_TEXT)))
+    normalized_audio_text = normalize_for_neutts(normalizer, AUDIO_TEXT)
     print("\nAUDIO SAMPLE TEXT")
     print(f"  raw:        {AUDIO_TEXT}")
     print(f"  normalized: {normalized_audio_text}")
