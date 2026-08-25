@@ -2,8 +2,8 @@
 
 Runtime:
 - VoiceInput owns Ctrl+/ and Moonshine.
-- SpeechOutputService owns interruptible Paul/NeuTTS output.
-- Qt owns presentation/tray.
+- SpeechOutputService owns interruptible/restartable Paul/NeuTTS output.
+- Qt owns presentation/tray and the persistent Voice-output resource setting.
 - GooseACP owns one ``goose acp`` child process + persistent session.
 - Finalized speech is sent to Goose.
 - Agent text streams into both the response card and sentence-buffered speech.
@@ -20,7 +20,7 @@ import sys
 import threading
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, QTimer, Signal, Slot
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import QApplication, QMenu, QStyle, QSystemTrayIcon
 
@@ -35,6 +35,7 @@ from Runtime.Host.goose_acp import (
     PermissionRequest,
 )
 from Runtime.Host.overlay import ApprovalOption, DexterOverlay
+from Runtime.Host.voice_output_control import VoiceOutputControl
 from Runtime.Voice.output_service import SpeechOutputService
 from Runtime.Voice.stt import PromptResult, VoiceInput, VoiceState
 
@@ -74,11 +75,17 @@ class RuntimeQtBridge(QObject):
     gateway_error = Signal(str)
     tts_ready = Signal(object)
     tts_error = Signal(str)
+    tts_disabled = Signal()
 
 
 class DexterHost:
     def __init__(self, app: QApplication) -> None:
         self.app = app
+        self.settings = QSettings("Dexter", "Dexter")
+        self._voice_enabled = bool(
+            self.settings.value("voice/output_enabled", True, type=bool)
+        )
+
         # Goose and the MCP child inherit this marker.  It lets bulk desktop
         # actions exclude Dexter's own top-level window without excluding every
         # unrelated Python application.
@@ -128,6 +135,11 @@ class DexterHost:
         self._connect_voice()
         self._connect_goose()
         self._connect_runtime()
+        self.voice_control = VoiceOutputControl(
+            self.overlay,
+            enabled=self._voice_enabled,
+            on_toggle=self._set_voice_enabled,
+        )
         self.overlay.prompt_submitted.connect(self._on_typed_prompt)
         self.overlay.cancel_requested.connect(self._cancel_agent_turn)
         self.overlay.approval_selected.connect(self._on_approval_selected)
@@ -201,6 +213,7 @@ class DexterHost:
         self.runtime_bridge.gateway_error.connect(self._on_gateway_error)
         self.runtime_bridge.tts_ready.connect(self._on_tts_ready)
         self.runtime_bridge.tts_error.connect(self._on_tts_error)
+        self.runtime_bridge.tts_disabled.connect(self._on_tts_disabled)
 
     def _configure_ctrl_c(self) -> None:
         signal.signal(signal.SIGINT, lambda _sig, _frame: self.request_quit())
@@ -231,9 +244,15 @@ class DexterHost:
         )
         self._voice_startup_thread.start()
 
-        # Paul is intentionally warmed in parallel. A failed or slow TTS model
-        # must never block text/voice input or the Goose session from becoming
-        # usable; replies are simply text-only until this reports ready.
+        # Voice output is a persistent resource preference. When disabled,
+        # Dexter deliberately skips the NeuTTS worker/model warm-up entirely.
+        if self._voice_enabled:
+            self.voice_control.set_state("starting")
+            self._start_speech_output()
+        else:
+            self.voice_control.set_state("off")
+
+    def _start_speech_output(self) -> None:
         self.speech.start_async(
             on_ready=self.runtime_bridge.tts_ready.emit,
             on_error=self.runtime_bridge.tts_error.emit,
@@ -281,6 +300,34 @@ class DexterHost:
             QSystemTrayIcon.ActivationReason.DoubleClick,
         ):
             self.show_overlay()
+
+    @Slot(bool)
+    def _set_voice_enabled(self, enabled: bool) -> None:
+        if self._quitting:
+            return
+
+        enabled = bool(enabled)
+        self._voice_enabled = enabled
+        self.settings.setValue("voice/output_enabled", enabled)
+        self.settings.sync()
+
+        if enabled:
+            self.voice_control.set_state("starting")
+            if not self.speech.start_async(
+                on_ready=self.runtime_bridge.tts_ready.emit,
+                on_error=self.runtime_bridge.tts_error.emit,
+            ):
+                if self.speech.ready:
+                    self.voice_control.set_state("ready")
+                elif self.speech.state == "off":
+                    self.voice_control.set_state("error")
+        else:
+            # Make the UI/text path inactive immediately; model shutdown itself
+            # runs off the Qt thread and confirms when resources are released.
+            self.voice_control.set_state("stopping")
+            self.speech.disable_async(
+                on_disabled=self.runtime_bridge.tts_disabled.emit,
+            )
 
     @Slot(int, str)
     def _on_partial(self, _session_id: int, text: str) -> None:
@@ -526,6 +573,11 @@ class DexterHost:
 
     @Slot(object)
     def _on_tts_ready(self, info) -> None:
+        # The service suppresses stale warm-up callbacks after Voice is turned
+        # off. This therefore represents the currently enabled production worker.
+        if self._voice_enabled:
+            self.voice_control.set_state("ready")
+
         if isinstance(info, dict):
             load = info.get("load_seconds")
             speaker = info.get("speaker", "paul")
@@ -537,9 +589,16 @@ class DexterHost:
 
     @Slot(str)
     def _on_tts_error(self, message: str) -> None:
-        # TTS is optional at the Host boundary. Keep Dexter usable as text-only
-        # and make the failure visible in the console for diagnosis.
+        # Keep the user's preference enabled so a transient startup failure does
+        # not silently rewrite settings. The secondary action becomes a retry.
+        if self._voice_enabled:
+            self.voice_control.set_state("error")
         print(f"[TTS ERROR] {message}", file=sys.stderr)
+
+    @Slot()
+    def _on_tts_disabled(self) -> None:
+        self.voice_control.set_state("off")
+        print("[TTS] Voice output off; model resources released")
 
     @Slot(object)
     def _on_permission_request(self, request: PermissionRequest) -> None:
