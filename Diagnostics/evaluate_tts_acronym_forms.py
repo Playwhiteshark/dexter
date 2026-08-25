@@ -13,15 +13,19 @@ Outputs are written under Runtime\Voice\debug\acronym_matrix\.
 
 from __future__ import annotations
 
+import sys
 import threading
 import wave
 from pathlib import Path
 
 import numpy as np
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from Runtime.Voice.neutts2e_backend import NeuTTS2EBackend
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = REPO_ROOT / "Runtime" / "Voice" / "debug" / "acronym_matrix"
 
 FORMS = {
