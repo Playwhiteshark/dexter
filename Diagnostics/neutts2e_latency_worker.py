@@ -1,4 +1,4 @@
-"""Diagnostic worker for measuring NeuTTS first-audio chunk sizes.
+"""Diagnostic worker for measuring NeuTTS streaming frame sizes.
 
 This wrapper changes only NeuTTS's streaming frame count and matching overlap-add
 stride before warmup. Production remains at the upstream 25-frame default.
@@ -22,8 +22,8 @@ try:
     STREAM_FRAMES = int(frames_raw)
 except ValueError as exc:
     raise SystemExit("DEXTER_TTS_DIAGNOSTIC_STREAM_FRAMES must be an integer") from exc
-if STREAM_FRAMES < 10 or STREAM_FRAMES > 25:
-    raise SystemExit("Diagnostic stream frames must be between 10 and 25")
+if STREAM_FRAMES < 10 or STREAM_FRAMES > 60:
+    raise SystemExit("Diagnostic stream frames must be between 10 and 60")
 
 import neutts.neutts as neutts_core
 
