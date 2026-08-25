@@ -14,14 +14,17 @@ class _FakeOutputStream:
         self.kwargs = kwargs
         self.callback = kwargs["callback"]
         self.started = False
-        self.aborted = False
+        self.start_calls = 0
+        self.abort_calls = 0
         self.closed = False
 
     def start(self) -> None:
         self.started = True
+        self.start_calls += 1
 
     def abort(self) -> None:
-        self.aborted = True
+        self.started = False
+        self.abort_calls += 1
 
     def close(self) -> None:
         self.closed = True
@@ -64,6 +67,40 @@ class BufferedSoundDeviceAudioSinkTests(unittest.TestCase):
         finally:
             sink.stop()
 
+    def test_fixed_format_preopens_and_reuses_stream_after_interrupt(self) -> None:
+        factory = _StreamFactory()
+        sink = BufferedSoundDeviceAudioSink(
+            prebuffer_seconds=0.2,
+            rebuffer_seconds=0.2,
+            max_buffer_seconds=1.0,
+            startup_max_wait_seconds=30.0,
+            expected_sample_rate=10,
+            expected_channels=1,
+            stream_factory=factory,
+        )
+        sink.start()
+        self.assertEqual(len(factory.streams), 1)
+        stream = factory.streams[0]
+        self.assertFalse(stream.started)
+
+        cancel = threading.Event()
+        try:
+            sink.play(AudioChunk(np.array([1.0, 2.0], dtype=np.float32), 10), cancel)
+            self.assertEqual(stream.start_calls, 1)
+
+            sink.interrupt()
+            self.assertEqual(stream.abort_calls, 1)
+            self.assertFalse(stream.closed)
+            self.assertEqual(sink.buffered_seconds, 0.0)
+
+            sink.play(AudioChunk(np.array([3.0, 4.0], dtype=np.float32), 10), cancel)
+            self.assertEqual(len(factory.streams), 1)
+            self.assertEqual(stream.start_calls, 2)
+        finally:
+            sink.stop()
+
+        self.assertTrue(stream.closed)
+
     def test_callback_rebuffers_after_underflow_instead_of_chattering(self) -> None:
         sink, factory = self.make_sink()
         cancel = threading.Event()
@@ -97,7 +134,7 @@ class BufferedSoundDeviceAudioSinkTests(unittest.TestCase):
         finally:
             sink.stop()
 
-    def test_interrupt_aborts_stream_and_discards_buffered_audio(self) -> None:
+    def test_interrupt_aborts_and_closes_lazy_stream(self) -> None:
         sink, factory = self.make_sink()
         cancel = threading.Event()
         sink.play(AudioChunk(np.array([1.0, 2.0], dtype=np.float32), 10), cancel)
@@ -105,7 +142,7 @@ class BufferedSoundDeviceAudioSinkTests(unittest.TestCase):
 
         sink.interrupt()
 
-        self.assertTrue(stream.aborted)
+        self.assertEqual(stream.abort_calls, 1)
         self.assertTrue(stream.closed)
         self.assertEqual(sink.buffered_seconds, 0.0)
 
