@@ -122,11 +122,8 @@ class RuntimeReadinessView(QFrame):
     ) -> None:
         super().__init__(overlay)
         self.setObjectName("readinessPanel")
-        # Preferred/Preferred widgets are allowed to shrink below sizeHint().
-        # During compact startup that let Qt crush the four status rows into a
-        # thin strip while giving the stretchable transcript the remaining
-        # height. The readiness rows are small fixed chrome: keep their natural
-        # vertical size and let the transcript absorb any pressure instead.
+        # The readiness list is small fixed chrome. Keep it ahead of the
+        # stretchable transcript when the compact overlay is allocating height.
         self.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Minimum,
@@ -269,6 +266,21 @@ class RuntimeReadinessView(QFrame):
         self.title_label.setText(
             "Dexter needs attention" if has_failure else "Starting Dexter"
         )
+
+        # A size policy only expresses preference; nested Qt layouts can still
+        # squeeze a child below sizeHint() when the parent is compact. While this
+        # startup surface is shown, make its natural height an explicit floor so
+        # all rows remain readable. Release that floor again as soon as it hides
+        # so ordinary transcript content-hugging is unchanged.
+        if visible:
+            layout = self.layout()
+            if layout is not None:
+                layout.invalidate()
+                layout.activate()
+            self.setMinimumHeight(max(0, self.sizeHint().height()))
+        else:
+            self.setMinimumHeight(0)
+
         # Dexter normally starts with its parent overlay hidden. isVisible()
         # therefore cannot tell us whether this child is explicitly hidden;
         # always set the requested child visibility so a settled panel does not
