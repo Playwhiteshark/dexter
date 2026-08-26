@@ -10,6 +10,7 @@ Normal host shutdown terminates only the Gateway process Dexter created.
 
 from __future__ import annotations
 
+import os
 import queue
 import subprocess
 import sys
@@ -19,6 +20,8 @@ from collections import deque
 from collections.abc import Callable
 from enum import StrEnum
 from pathlib import Path
+
+from Runtime.Host.agent_profile import AgentProfile, load_profile
 
 
 class GatewayState(StrEnum):
@@ -39,11 +42,13 @@ class GatewayProcess:
         self,
         script: Path,
         *,
+        profile: AgentProfile | None = None,
         on_state: StateCallback | None = None,
         on_error: StringCallback | None = None,
         on_log: StringCallback | None = None,
     ) -> None:
         self.script = Path(script).resolve()
+        self.profile = profile or load_profile()
         self._on_state = on_state
         self._on_error = on_error
         self._on_log = on_log
@@ -67,6 +72,12 @@ class GatewayProcess:
     def pid(self) -> int | None:
         process = self._process
         return None if process is None else process.pid
+
+    def _gateway_environment(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env["DEXTER_MODEL"] = self.profile.model.name
+        env["DEXTER_REASONING_EFFORT"] = self.profile.model.reasoning_effort
+        return env
 
     def start(self, timeout: float = 8.0) -> None:
         if not self.script.is_file():
@@ -97,6 +108,7 @@ class GatewayProcess:
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            env=self._gateway_environment(),
             creationflags=creationflags,
         )
 
