@@ -38,6 +38,11 @@ class RuntimeReadinessViewTests(unittest.TestCase):
     def _layout_changed(self) -> None:
         self.layout_changes += 1
 
+    def _settle_core(self) -> None:
+        self.view.set_component("gateway", "ready")
+        self.view.set_component("agent", "ready")
+        self.view.set_component("mic", "ready")
+
     def test_startup_stages_hide_only_after_every_component_settles(self) -> None:
         self.view.begin_startup(voice_enabled=True)
         self.assertTrue(self.view.isVisible())
@@ -47,9 +52,7 @@ class RuntimeReadinessViewTests(unittest.TestCase):
         self.assertEqual(self.view.state("voice"), "starting")
         self.assertEqual(self.view.title_label.text(), "Starting Dexter")
 
-        self.view.set_component("gateway", "ready")
-        self.view.set_component("agent", "ready")
-        self.view.set_component("mic", "ready")
+        self._settle_core()
         self.assertTrue(self.view.isVisible())
 
         self.view.set_component("voice", "ready")
@@ -58,11 +61,20 @@ class RuntimeReadinessViewTests(unittest.TestCase):
 
     def test_disabled_voice_is_a_settled_state(self) -> None:
         self.view.begin_startup(voice_enabled=False)
-        self.view.set_component("gateway", "ready")
-        self.view.set_component("agent", "ready")
-        self.view.set_component("mic", "ready")
+        self._settle_core()
 
         self.assertEqual(self.view.state("voice"), "off")
+        self.assertFalse(self.view.isVisible())
+
+    def test_settled_panel_stays_hidden_when_parent_was_hidden_during_startup(self) -> None:
+        self.overlay.hide()
+        self.view.begin_startup(voice_enabled=False)
+        self._settle_core()
+
+        self.assertTrue(self.view.isHidden())
+
+        self.overlay.show()
+        self._app.processEvents()
         self.assertFalse(self.view.isVisible())
 
     def test_failure_keeps_component_and_reason_visible_without_log_dump(self) -> None:
