@@ -6,7 +6,7 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QSizePolicy
 
 from Runtime.Host.interactive_overlay import DexterOverlay
 from Runtime.Host.voice_output_control import VoiceOutputControl
@@ -43,34 +43,61 @@ class OverlayUITests(unittest.TestCase):
             self.overlay._permanent_cards[1],
         )
 
-    def test_short_history_hugs_content_below_height_cap(self) -> None:
-        self.overlay.resize(
-            self.overlay._DEFAULT_WIDTH,
-            self.overlay._DEFAULT_HEIGHT,
+    def test_transcript_uses_content_preferred_sizing_without_bottom_spacing(self) -> None:
+        policy = self.overlay.scroll.sizePolicy()
+        self.assertEqual(
+            policy.verticalPolicy(),
+            QSizePolicy.Policy.Preferred,
         )
+        self.assertEqual(self.overlay.panel.layout().spacing(), 0)
+        self.assertEqual(self.overlay.minimumHeight(), 120)
+
+    def test_manual_vertical_resize_disables_auto_fit_for_session(self) -> None:
         self.overlay.finalize_user_prompt("short message")
         self.overlay._fit_height_to_content()
+        compact_height = self.overlay.height()
+        self.assertLessEqual(compact_height, self.overlay._DEFAULT_HEIGHT)
 
-        self.assertLess(
-            self.overlay.height(),
-            self.overlay._DEFAULT_HEIGHT,
-        )
-        self.assertGreaterEqual(
-            self.overlay.height(),
-            self.overlay.minimumHeight(),
-        )
+        manual_height = compact_height + 90
+        self.overlay.resize(self.overlay.width(), manual_height)
+        self._app.processEvents()
 
-    def test_busy_composer_keeps_typing_and_interrupt_send_available(self) -> None:
+        self.assertFalse(self.overlay._auto_fit_enabled)
+        self.assertEqual(self.overlay.height(), manual_height)
+
+        # Later transcript changes must not snap the user's chosen height back.
+        self.overlay.finalize_user_prompt("another short message")
+        self._app.processEvents()
+        self.overlay._fit_height_to_content()
+        self.assertEqual(self.overlay.height(), manual_height)
+
+    def test_busy_composer_swaps_cancel_and_send_now_in_one_slot(self) -> None:
         self.overlay.set_prompt_input_enabled(True)
         self.overlay.set_agent_busy(True)
 
         self.assertTrue(self.overlay.prompt_input.isEnabled())
+        self.assertFalse(self.overlay.send_button.isVisible())
+        self.assertTrue(self.overlay.cancel_button.isVisible())
+
+        self.overlay.prompt_input.setText("replacement")
+        self._app.processEvents()
         self.assertTrue(self.overlay.send_button.isVisible())
         self.assertEqual(self.overlay.send_button.text(), "Send now")
+        self.assertFalse(self.overlay.cancel_button.isVisible())
+        self.assertEqual(
+            self.overlay.send_button.minimumWidth(),
+            self.overlay.cancel_button.minimumWidth(),
+        )
+
+        self.overlay.prompt_input.clear()
+        self._app.processEvents()
+        self.assertFalse(self.overlay.send_button.isVisible())
         self.assertTrue(self.overlay.cancel_button.isVisible())
 
         self.overlay.set_agent_busy(False)
+        self.assertTrue(self.overlay.send_button.isVisible())
         self.assertEqual(self.overlay.send_button.text(), "Send")
+        self.assertFalse(self.overlay.cancel_button.isVisible())
 
     def test_interrupted_response_is_frozen_before_next_user_turn(self) -> None:
         self.overlay.begin_assistant_response()

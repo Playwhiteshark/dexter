@@ -3,38 +3,66 @@
 This keeps the presentation primitives in ``overlay.py`` small while owning the
 higher-level interaction behavior that depends on runtime state:
 
-* short transcripts hug their content instead of reserving an empty viewport;
-* the window grows upward until the user's current height cap, then scrolls;
+* short transcripts start compact without reserving a dead viewport;
+* manual window resizing is always respected once the user changes the height;
 * typed input remains available while Dexter is responding; and
-* the send action becomes an explicit interrupting send while a turn is active.
+* one right-hand action slot swaps between Send, Cancel, and Send now.
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QTimer
-from PySide6.QtWidgets import QSizePolicy
+from PySide6.QtWidgets import QLayout, QSizePolicy
 
 from Runtime.Host.overlay import ApprovalOption
 from Runtime.Host.overlay import DexterOverlay as _BaseDexterOverlay
 
 
 class DexterOverlay(_BaseDexterOverlay):
-    """Dexter overlay with adaptive sizing and interruption-friendly composer."""
+    """Dexter overlay with compact startup sizing and interruption-friendly input."""
 
     def __init__(self) -> None:
         self._fitting_height = False
         self._fit_scheduled = False
-        self._auto_height_cap = self._DEFAULT_HEIGHT
+        self._auto_fit_enabled = True
         super().__init__()
 
-        # QScrollArea has a useful size hint for ordinary windows, but here the
-        # transcript must be able to collapse all the way to its actual content.
-        # Once the overlay reaches its cap the same widget expands and scrolls.
+        # Keep the minimum just large enough for the header/composer chrome.
+        # The previous 180 px minimum could itself create a visible blank band
+        # below a short transcript even when the content-fit math was correct.
+        self.setMinimumHeight(120)
+
+        # QSizePolicy::Ignored tells Qt to disregard the scroll area's size hint
+        # and give it as much space as possible. That is exactly the opposite of
+        # what a compact transcript needs. Preferred still permits normal manual
+        # expansion while respecting the content-derived size hint.
         self.scroll.setMinimumHeight(0)
         self.scroll.setSizePolicy(
             QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Preferred,
         )
+
+        # Qt recommends constraining layouts whose scroll-area contents change
+        # dynamically so the surrounding geometry is invalidated promptly.
+        self.history_layout.setSizeConstraint(
+            QLayout.SizeConstraint.SetMinAndMaxSize
+        )
+
+        # The base panel used a global 8 px spacing between every layout item.
+        # That left a permanent visible strip between the final transcript card
+        # and the composer. Keep the useful header separation explicitly, but no
+        # spacing after the transcript itself.
+        panel_layout = self.panel.layout()
+        if panel_layout is not None:
+            panel_layout.setSpacing(0)
+            if hasattr(panel_layout, "insertSpacing"):
+                panel_layout.insertSpacing(1, 8)
+
+        # Send / Cancel / Send now share the same physical action slot. Matching
+        # minimum widths prevents the composer from shifting as the mode swaps.
+        self.send_button.setMinimumWidth(72)
+        self.cancel_button.setMinimumWidth(72)
+        self.prompt_input.textChanged.connect(self._refresh_composer_state)
 
         self.history_widget.installEventFilter(self)
         self._schedule_content_fit()
@@ -58,18 +86,16 @@ class DexterOverlay(_BaseDexterOverlay):
             and event.oldSize().isValid()
             and event.size().height() != event.oldSize().height()
         ):
-            # A user-driven vertical resize establishes the new maximum height.
-            # Short conversations still hug their contents below this cap.
-            self._auto_height_cap = max(
-                self.minimumHeight(),
-                event.size().height(),
-            )
-            self._schedule_content_fit()
+            # Any real user resize becomes authoritative for the rest of this
+            # Host session. Content changes may scroll, but they must never pull
+            # the window back to the transcript's preferred height.
+            self._auto_fit_enabled = False
 
     def _refresh_composer_state(self) -> None:
         # Typing is deliberately independent from the active agent turn. The
         # Host decides whether a submitted prompt is a normal send or a barge-in.
         can_type = self._prompt_input_available and not self._recording
+        has_text = bool(self.prompt_input.text().strip())
 
         self.prompt_input.setEnabled(can_type)
         self.prompt_input.setVisible(not self._recording)
@@ -77,9 +103,18 @@ class DexterOverlay(_BaseDexterOverlay):
         self.recording_dot.setVisible(self._recording)
         self.recording_label.setVisible(self._recording)
 
-        self.send_button.setEnabled(can_type)
-        self.send_button.setVisible(not self._recording)
+        if self._recording:
+            self.send_button.hide()
+            self.cancel_button.hide()
+            self._schedule_content_fit()
+            return
+
         if self._agent_busy:
+            # Empty composer: the useful action is Cancel. As soon as the user
+            # drafts a replacement, that exact slot becomes Send now.
+            show_send_now = can_type and has_text
+            self.send_button.setVisible(show_send_now)
+            self.send_button.setEnabled(show_send_now)
             self.send_button.setText("Send now")
             self.send_button.setToolTip(
                 "Cancel Dexter's current response and send this message"
@@ -87,17 +122,18 @@ class DexterOverlay(_BaseDexterOverlay):
             self.send_button.setAccessibleName(
                 "Cancel current response and send message"
             )
+
+            self.cancel_button.setVisible(not show_send_now)
+            self.cancel_button.setEnabled(self._cancel_enabled)
         else:
+            self.send_button.show()
+            self.send_button.setEnabled(can_type)
             self.send_button.setText("Send")
             self.send_button.setToolTip("Send message")
             self.send_button.setAccessibleName("Send message")
 
-        self.cancel_button.setVisible(
-            self._agent_busy and not self._recording
-        )
-        self.cancel_button.setEnabled(
-            self._agent_busy and self._cancel_enabled
-        )
+            self.cancel_button.hide()
+
         self._schedule_content_fit()
 
     def finish_interrupted_response(self) -> None:
@@ -122,7 +158,7 @@ class DexterOverlay(_BaseDexterOverlay):
         self._schedule_content_fit()
 
     def _schedule_content_fit(self) -> None:
-        if self._fit_scheduled:
+        if not self._auto_fit_enabled or self._fit_scheduled:
             return
         self._fit_scheduled = True
         QTimer.singleShot(0, self._fit_height_to_content)
@@ -134,17 +170,17 @@ class DexterOverlay(_BaseDexterOverlay):
 
     def _fit_height_to_content(self) -> None:
         self._fit_scheduled = False
-        if not hasattr(self, "scroll"):
+        if not self._auto_fit_enabled or not hasattr(self, "scroll"):
             return
 
-        # Everything outside the scroll area is fixed-height UI chrome. The
-        # transcript itself receives only the height its contents need, until
-        # the current user/default height cap is reached.
+        # Auto-fit is only the compact initial/default behavior. It grows up to
+        # Dexter's historical default height; any manual vertical resize disables
+        # this routine and becomes authoritative instead.
         chrome_height = max(0, self.height() - self.scroll.height())
         desired = chrome_height + self._history_content_height()
         target = max(
             self.minimumHeight(),
-            min(self._auto_height_cap, desired),
+            min(self._DEFAULT_HEIGHT, desired),
         )
 
         if abs(target - self.height()) <= 1:
@@ -154,14 +190,14 @@ class DexterOverlay(_BaseDexterOverlay):
         self._fitting_height = True
         try:
             self.resize(self.width(), target)
-            # Dexter lives at the bottom of the screen by default, so grow and
-            # shrink upward rather than walking the composer down the desktop.
+            # Dexter lives at the bottom of the screen by default, so automatic
+            # compacting/growth moves the top edge rather than the composer.
             self.move(self.x(), bottom - target + 1)
         finally:
             self._fitting_height = False
 
-    # These explicit hooks make content-fit deterministic even when Qt chooses
-    # not to emit a LayoutRequest for a particular child-label update.
+    # These explicit hooks make compact fitting deterministic even when Qt
+    # chooses not to emit a LayoutRequest for a particular child-label update.
     def set_stt_partial(self, text: str) -> None:
         super().set_stt_partial(text)
         self._schedule_content_fit()
