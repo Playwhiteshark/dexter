@@ -34,7 +34,7 @@ from Runtime.Host.goose_acp import (
     GooseState,
     PermissionRequest,
 )
-from Runtime.Host.overlay import ApprovalOption, DexterOverlay
+from Runtime.Host.interactive_overlay import ApprovalOption, DexterOverlay
 from Runtime.Host.voice_output_control import VoiceOutputControl
 from Runtime.Voice.output_service import SpeechOutputService
 from Runtime.Voice.stt import PromptResult, VoiceInput, VoiceState
@@ -127,6 +127,8 @@ class DexterHost:
 
         self._quitting = False
         self._agent_turn_pending = False
+        self._pending_replacement_prompt: str | None = None
+        self._discard_interrupted_response = False
         self._runtime_startup_thread: threading.Thread | None = None
         self._voice_startup_thread: threading.Thread | None = None
 
@@ -338,16 +340,75 @@ class DexterHost:
     def _on_prompt(self, result: PromptResult) -> None:
         self.summon_overlay()
         self.overlay.finalize_user_prompt(result.text)
-        self._submit_to_agent(result.text)
+        self._accept_user_prompt(result.text)
 
     @Slot(str)
     def _on_typed_prompt(self, text: str) -> None:
         prompt = text.strip()
         if not prompt:
             return
+
+        if self._turn_is_active():
+            self._interrupt_active_turn_for_replacement()
+
         self.show_overlay()
         self.overlay.finalize_user_prompt(prompt)
+        self._accept_user_prompt(prompt)
+
+    def _turn_is_active(self) -> bool:
+        return (
+            self._agent_turn_pending
+            or self.goose.state is GooseState.THINKING
+        )
+
+    def _interrupt_active_turn_for_replacement(self) -> None:
+        """Freeze/cancel the active response at the user's interruption point."""
+        self.speech.interrupt()
+        if not self._turn_is_active():
+            return
+
+        # Freeze the visible response before a new user draft/card can be added.
+        # Late chunks from the cancelled ACP turn are ignored until its end event.
+        self.overlay.clear_approval()
+        self.overlay.finish_interrupted_response()
+        self._discard_interrupted_response = True
+        self.overlay.set_cancel_enabled(False)
+        self.goose.cancel_current()
+
+    def _accept_user_prompt(self, prompt: str) -> None:
+        """Submit now or hold exactly one prompt behind active-turn cancellation."""
+        text = prompt.strip()
+        if not text:
+            return
+
+        self.speech.interrupt()
+
+        if self._turn_is_active():
+            self._pending_replacement_prompt = text
+            self.overlay.set_status("Switching…")
+            self.overlay.set_cancel_enabled(False)
+            # PTT may have already requested cancellation at key-down. A second
+            # cancel is harmless and closes the race where finalization beats it.
+            self.goose.cancel_current()
+            self._refresh_interaction_admission()
+            return
+
+        self._submit_to_agent(text)
+
+    def _submit_pending_replacement_if_ready(self) -> bool:
+        prompt = self._pending_replacement_prompt
+        if (
+            not prompt
+            or self._quitting
+            or self.gateway.state is not GatewayState.READY
+            or self.goose.state is not GooseState.IDLE
+        ):
+            return False
+
+        self._pending_replacement_prompt = None
+        self.overlay.set_cancel_enabled(True)
         self._submit_to_agent(prompt)
+        return True
 
     def _submit_to_agent(self, prompt: str) -> None:
         # A fresh user turn always wins over old spoken output. PTT normally
@@ -361,7 +422,9 @@ class DexterHost:
             if self.gateway.state is not GatewayState.READY:
                 self.overlay.set_status("Gateway unavailable")
             elif self.goose.state is GooseState.THINKING:
-                self.overlay.set_status("Dexter is already responding")
+                self._pending_replacement_prompt = prompt
+                self.goose.cancel_current()
+                self.overlay.set_status("Switching…")
             else:
                 self.overlay.set_status("Dexter unavailable")
             return
@@ -372,16 +435,30 @@ class DexterHost:
         self.overlay.set_status("Thinking…")
 
     def _refresh_interaction_admission(self) -> None:
-        """Keep typed and voice input governed by the same turn boundary."""
-        can_prompt = (
+        """Keep input live while a turn runs, without creating a hidden queue."""
+        runtime_accepts_input = (
+            not self._quitting
+            and self.gateway.state is GatewayState.READY
+            and self.goose.state in (GooseState.IDLE, GooseState.THINKING)
+        )
+
+        # One replacement prompt may wait behind cancellation. Once one exists,
+        # temporarily close new submissions until it is handed to Goose.
+        can_submit_or_interrupt = (
+            runtime_accepts_input
+            and self._pending_replacement_prompt is None
+        )
+        can_clear = (
             not self._quitting
             and not self._agent_turn_pending
+            and self._pending_replacement_prompt is None
             and self.gateway.state is GatewayState.READY
             and self.goose.state is GooseState.IDLE
         )
-        self.overlay.set_prompt_input_enabled(can_prompt)
-        self.overlay.set_clear_chat_enabled(can_prompt)
-        self.voice.set_capture_enabled(can_prompt)
+
+        self.overlay.set_prompt_input_enabled(can_submit_or_interrupt)
+        self.overlay.set_clear_chat_enabled(can_clear)
+        self.voice.set_capture_enabled(can_submit_or_interrupt)
 
     @Slot()
     def _cancel_agent_turn(self) -> None:
@@ -419,9 +496,9 @@ class DexterHost:
             ):
                 self.overlay.set_status("Idle")
         elif state is VoiceState.LISTENING:
-            # PTT is a hard barge-in boundary: stop audible/queued TTS before
-            # showing the listening state or accepting the new utterance.
-            self.speech.interrupt()
+            # PTT is a true barge-in boundary. Stop audio and cancel/freeze the
+            # active model turn at key-down, before recording the replacement.
+            self._interrupt_active_turn_for_replacement()
             self.summon_overlay()
             self.overlay.set_stt_partial("")
             self.overlay.set_status("Listening…")
@@ -440,6 +517,10 @@ class DexterHost:
             if self.voice.state is not VoiceState.LISTENING:
                 self.overlay.set_status("Starting Dexter…")
         elif state is GooseState.IDLE:
+            # A replacement is submitted only after ACP has fully returned to
+            # IDLE. This avoids the cancel-vs-submit race and keeps one turn live.
+            if self._submit_pending_replacement_if_ready():
+                return
             self._refresh_interaction_admission()
             if self.voice.state is VoiceState.IDLE and not self._agent_turn_pending:
                 self.overlay.set_status("Idle")
@@ -452,12 +533,16 @@ class DexterHost:
             self._refresh_interaction_admission()
             self.overlay.set_status("Thinking…")
         elif state is GooseState.ERROR:
+            self._pending_replacement_prompt = None
+            self._discard_interrupted_response = False
             self.speech.interrupt()
             self.overlay.set_agent_busy(False)
             self._refresh_interaction_admission()
             self.show_overlay()
             self.overlay.set_status("Agent error")
         elif state is GooseState.STOPPED and not self._quitting:
+            self._pending_replacement_prompt = None
+            self._discard_interrupted_response = False
             self.speech.interrupt()
             self.overlay.set_agent_busy(False)
             self._refresh_interaction_admission()
@@ -479,6 +564,8 @@ class DexterHost:
     def _on_chat_cleared(self) -> None:
         self.speech.interrupt()
         self._agent_turn_pending = False
+        self._pending_replacement_prompt = None
+        self._discard_interrupted_response = False
         self.overlay.clear_history()
         self.overlay.set_agent_busy(False)
         self._refresh_interaction_admission()
@@ -488,6 +575,7 @@ class DexterHost:
     @Slot()
     def _on_response_start(self) -> None:
         self._agent_turn_pending = True
+        self._discard_interrupted_response = False
         self.overlay.set_agent_busy(True)
         self._refresh_interaction_admission()
         self.summon_overlay()
@@ -497,21 +585,27 @@ class DexterHost:
 
     @Slot(str)
     def _on_response_text(self, text: str) -> None:
-        # Response start summons Dexter once. Streaming chunks must not force a
-        # window that the user deliberately hid back on screen.
+        # Once the user has interrupted a turn, late ACP chunks from that
+        # cancelled response are deliberately dropped from both UI and speech.
+        if self._discard_interrupted_response:
+            return
         self.overlay.append_assistant_text(text)
         self.speech.add_text(text)
 
     @Slot(object)
     def _on_activity(self, update) -> None:
-        # Tool/reasoning updates follow the same visibility rule as text chunks.
+        if self._discard_interrupted_response:
+            return
         self.overlay.add_assistant_activity(update)
 
     @Slot(str)
     def _on_response_end(self, stop_reason: str) -> None:
+        interrupted = self._discard_interrupted_response
+        self._discard_interrupted_response = False
         self._agent_turn_pending = False
         self.overlay.clear_approval()
-        self.overlay.finish_assistant_response()
+        if not interrupted:
+            self.overlay.finish_assistant_response()
         self.overlay.set_agent_busy(False)
         if stop_reason == "end_turn":
             self.speech.finish_response()
@@ -520,10 +614,13 @@ class DexterHost:
             self.speech.interrupt()
 
         # Goose transitions to IDLE immediately after this callback; until that
-        # state arrives, admission intentionally remains closed.
+        # state arrives, admission intentionally remains closed for a queued
+        # replacement, but drafting remains available after ordinary completion.
         self._refresh_interaction_admission()
 
-        if stop_reason == "end_turn":
+        if self._pending_replacement_prompt is not None:
+            self.overlay.set_status("Switching…")
+        elif stop_reason == "end_turn":
             self.overlay.set_status("Idle")
         elif stop_reason == "cancelled":
             self.overlay.set_status("Cancelled")
@@ -542,12 +639,16 @@ class DexterHost:
             if self.goose.state is GooseState.STOPPED:
                 self.overlay.set_status("Starting agent…")
         elif state is GatewayState.ERROR:
+            self._pending_replacement_prompt = None
+            self._discard_interrupted_response = False
             self.speech.interrupt()
             self.overlay.set_agent_busy(False)
             self._refresh_interaction_admission()
             self.show_overlay()
             self.overlay.set_status("Gateway error")
         elif state is GatewayState.STOPPED and not self._quitting:
+            self._pending_replacement_prompt = None
+            self._discard_interrupted_response = False
             self.speech.interrupt()
             self.overlay.set_agent_busy(False)
             self._refresh_interaction_admission()
@@ -557,6 +658,8 @@ class DexterHost:
     def _on_gateway_error(self, message: str) -> None:
         self.speech.interrupt()
         self._agent_turn_pending = False
+        self._pending_replacement_prompt = None
+        self._discard_interrupted_response = False
         self.overlay.set_agent_busy(False)
         self._refresh_interaction_admission()
         self.show_overlay()
@@ -647,6 +750,8 @@ class DexterHost:
     def _on_goose_error(self, message: str) -> None:
         self.speech.interrupt()
         self._agent_turn_pending = False
+        self._pending_replacement_prompt = None
+        self._discard_interrupted_response = False
         self.overlay.clear_approval()
         self.overlay.set_agent_busy(False)
         self._refresh_interaction_admission()
@@ -661,6 +766,8 @@ class DexterHost:
             return
 
         self._quitting = True
+        self._pending_replacement_prompt = None
+        self._discard_interrupted_response = False
         self.speech.interrupt()
         self.overlay.clear_approval()
         self.overlay.set_agent_busy(False)
