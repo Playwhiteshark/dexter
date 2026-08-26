@@ -168,6 +168,57 @@ class DexterOverlay(_BaseDexterOverlay):
         self.history_layout.activate()
         return max(0, self.history_layout.sizeHint().height())
 
+    def _preferred_content_height(self) -> int:
+        """Measure visible chrome by size hints instead of squeezed geometry."""
+        outer_layout = self.layout()
+        panel_layout = self.panel.layout()
+        if outer_layout is None or panel_layout is None:
+            return self.minimumHeight()
+
+        margins = panel_layout.contentsMargins()
+        total = margins.top() + margins.bottom()
+        included_items = 0
+
+        for index in range(panel_layout.count()):
+            item = panel_layout.itemAt(index)
+            widget = item.widget()
+
+            if widget is self.scroll:
+                height = self._history_content_height()
+            elif widget is not None:
+                # isHidden() reflects the widget's own explicit visibility,
+                # unlike isVisible(), which is also false whenever the whole
+                # overlay is hidden in the tray during startup.
+                if widget.isHidden():
+                    continue
+                height = max(
+                    0,
+                    widget.minimumHeight(),
+                    widget.minimumSizeHint().height(),
+                    widget.sizeHint().height(),
+                )
+            elif item.spacerItem() is not None:
+                height = max(0, item.spacerItem().sizeHint().height())
+            elif item.layout() is not None:
+                child_layout = item.layout()
+                height = max(
+                    0,
+                    child_layout.minimumSize().height(),
+                    child_layout.sizeHint().height(),
+                )
+            else:
+                continue
+
+            total += height
+            included_items += 1
+
+        spacing = max(0, panel_layout.spacing())
+        if included_items > 1:
+            total += spacing * (included_items - 1)
+
+        outer_margins = outer_layout.contentsMargins()
+        return total + outer_margins.top() + outer_margins.bottom()
+
     def _fit_height_to_content(self) -> None:
         self._fit_scheduled = False
         if not self._auto_fit_enabled or not hasattr(self, "scroll"):
@@ -175,9 +226,11 @@ class DexterOverlay(_BaseDexterOverlay):
 
         # Auto-fit is only the compact initial/default behavior. It grows up to
         # Dexter's historical default height; any manual vertical resize disables
-        # this routine and becomes authoritative instead.
-        chrome_height = max(0, self.height() - self.scroll.height())
-        desired = chrome_height + self._history_content_height()
+        # this routine and becomes authoritative instead. Measure the visible
+        # chrome from its preferred sizes rather than from current child geometry:
+        # a newly inserted startup panel can otherwise be squeezed into the
+        # existing 120 px compact window before Qt has a chance to grow it.
+        desired = self._preferred_content_height()
         target = max(
             self.minimumHeight(),
             min(self._DEFAULT_HEIGHT, desired),
