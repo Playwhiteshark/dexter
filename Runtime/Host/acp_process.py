@@ -19,6 +19,8 @@ from acp.client.connection import ClientSideConnection
 from acp.interfaces import Client
 from acp.transports import default_environment
 
+from Runtime.Host.agent_profile import AgentProfile, load_profile
+
 
 SHUTDOWN_TIMEOUT_SECONDS = 2.0
 _WINDOWS_DESKTOP_ENV_VARS = (
@@ -36,14 +38,20 @@ def _windows_creation_flags() -> int:
     return 0
 
 
-def _agent_environment() -> dict[str, str]:
-    """Keep ACP's trimmed env plus standard Windows desktop runtime paths."""
+def _agent_environment(profile: AgentProfile | None = None) -> dict[str, str]:
+    """Build the ACP child environment from one validated agent profile."""
+    selected = profile or load_profile()
     env = default_environment()
     if sys.platform == "win32":
         for key in _WINDOWS_DESKTOP_ENV_VARS:
             value = os.environ.get(key)
             if value:
                 env[key] = value
+
+    # Profile values deliberately override Goose's persistent/global defaults.
+    # This makes the process Dexter starts belong to one explicit identity.
+    env["GOOSE_PROVIDER"] = selected.model.provider
+    env["GOOSE_MODEL"] = selected.model.name
     return env
 
 
@@ -53,13 +61,14 @@ async def spawn_host_agent_process(
     command: str,
     *args: str,
     cwd: str | Path | None = None,
+    profile: AgentProfile | None = None,
 ) -> AsyncIterator[tuple[ClientSideConnection, asyncio.subprocess.Process]]:
     """Spawn an ACP agent owned by Dexter's Host."""
     kwargs = {
         "stdin": asyncio.subprocess.PIPE,
         "stdout": asyncio.subprocess.PIPE,
         "stderr": asyncio.subprocess.PIPE,
-        "env": _agent_environment(),
+        "env": _agent_environment(profile),
         "cwd": str(cwd) if cwd is not None else None,
     }
     creationflags = _windows_creation_flags()
