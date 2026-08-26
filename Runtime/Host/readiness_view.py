@@ -1,7 +1,7 @@
 """Compact staged runtime-readiness surface for Dexter's Host.
 
 The Host already owns the real lifecycle state for Gateway, Goose, Moonshine and
-Voice output.  This module only presents those existing states; it deliberately
+Voice output. This module only presents those existing states; it deliberately
 does not introduce a second runtime state machine or change interaction gating.
 """
 
@@ -40,7 +40,11 @@ def _compact_reason(message: str, *, limit: int = 320) -> str:
         return ""
 
     paragraph = raw.split("\n\n", 1)[0]
-    compact = " ".join(part.strip() for part in paragraph.splitlines() if part.strip())
+    compact = " ".join(
+        part.strip()
+        for part in paragraph.splitlines()
+        if part.strip()
+    )
     if len(compact) <= limit:
         return compact
     return compact[: limit - 1].rstrip() + "…"
@@ -83,14 +87,20 @@ class _ReadinessRow(QFrame):
         layout.addLayout(top)
         layout.addWidget(self.reason_label)
 
-    def set_state(self, state: str, reason: str = "", full_reason: str = "") -> None:
+    def set_state(
+        self,
+        state: str,
+        reason: str = "",
+        full_reason: str = "",
+    ) -> None:
         self.state_label.setText(_STATE_LABELS[state])
         self.state_label.setProperty("state", state)
         self.state_label.style().unpolish(self.state_label)
         self.state_label.style().polish(self.state_label)
 
         self.reason_label.setText(reason)
-        self.reason_label.setToolTip(full_reason if full_reason and full_reason != reason else "")
+        tooltip = full_reason if full_reason and full_reason != reason else ""
+        self.reason_label.setToolTip(tooltip)
         self.reason_label.setVisible(bool(reason))
 
 
@@ -106,9 +116,13 @@ class RuntimeReadinessView(QFrame):
         super().__init__(overlay)
         self.setObjectName("readinessPanel")
         self._on_layout_changed = on_layout_changed
-        self._states = {component: "waiting" for component in _COMPONENT_LABELS}
+        self._states = {
+            component: "waiting" for component in _COMPONENT_LABELS
+        }
         self._reasons = {component: "" for component in _COMPONENT_LABELS}
-        self._full_reasons = {component: "" for component in _COMPONENT_LABELS}
+        self._full_reasons = {
+            component: "" for component in _COMPONENT_LABELS
+        }
         self._rows: dict[str, _ReadinessRow] = {}
 
         layout = QVBoxLayout(self)
@@ -230,8 +244,11 @@ class RuntimeReadinessView(QFrame):
         self.title_label.setText(
             "Dexter needs attention" if has_failure else "Starting Dexter"
         )
-        if self.isVisible() != visible:
-            self.setVisible(visible)
+        # Dexter normally starts with its parent overlay hidden. isVisible()
+        # therefore cannot tell us whether this child is explicitly hidden;
+        # always set the requested child visibility so a settled panel does not
+        # reappear the next time the tray window is opened.
+        self.setVisible(visible)
         self.updateGeometry()
         if self._on_layout_changed is not None:
             self._on_layout_changed()
