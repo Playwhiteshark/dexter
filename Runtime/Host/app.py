@@ -35,6 +35,7 @@ from Runtime.Host.goose_acp import (
     PermissionRequest,
 )
 from Runtime.Host.interactive_overlay import ApprovalOption, DexterOverlay
+from Runtime.Host.readiness_view import RuntimeReadinessView
 from Runtime.Host.voice_output_control import VoiceOutputControl
 from Runtime.Voice.output_service import SpeechOutputService
 from Runtime.Voice.stt import PromptResult, VoiceInput, VoiceState
@@ -137,6 +138,10 @@ class DexterHost:
         self._connect_voice()
         self._connect_goose()
         self._connect_runtime()
+        self.readiness = RuntimeReadinessView(
+            self.overlay,
+            on_layout_changed=self.overlay._schedule_content_fit,
+        )
         self.voice_control = VoiceOutputControl(
             self.overlay,
             enabled=self._voice_enabled,
@@ -225,6 +230,7 @@ class DexterHost:
         self._signal_pump.start()
 
     def start(self) -> None:
+        self.readiness.begin_startup(voice_enabled=self._voice_enabled)
         self.overlay.set_status("Starting Dexter…")
         self.hide_overlay()
 
@@ -314,18 +320,26 @@ class DexterHost:
         self.settings.sync()
 
         if enabled:
+            self.readiness.set_component("voice", "starting")
             self.voice_control.set_state("starting")
             if not self.speech.start_async(
                 on_ready=self.runtime_bridge.tts_ready.emit,
                 on_error=self.runtime_bridge.tts_error.emit,
             ):
                 if self.speech.ready:
+                    self.readiness.set_component("voice", "ready")
                     self.voice_control.set_state("ready")
                 elif self.speech.state == "off":
+                    self.readiness.set_component(
+                        "voice",
+                        "error",
+                        reason="Voice output could not start. Retry from Dexter options.",
+                    )
                     self.voice_control.set_state("error")
         else:
             # Make the UI/text path inactive immediately; model shutdown itself
             # runs off the Qt thread and confirms when resources are released.
+            self.readiness.set_component("voice", "stopping")
             self.voice_control.set_state("stopping")
             self.speech.disable_async(
                 on_disabled=self.runtime_bridge.tts_disabled.emit,
@@ -482,20 +496,24 @@ class DexterHost:
         self.overlay.set_recording(state is VoiceState.LISTENING)
 
         if state is VoiceState.LOADING:
-            if self.goose.state is GooseState.STARTING:
+            self.readiness.set_component("mic", "starting")
+            if self.gateway.state is not GatewayState.READY or self.goose.state is GooseState.STARTING:
                 self.overlay.set_status("Starting Dexter…")
             else:
-                self.overlay.set_status("Loading speech…")
+                self.overlay.set_status("Loading microphone…")
         elif state is VoiceState.IDLE:
+            self.readiness.set_component("mic", "ready")
             # STT returns to IDLE immediately after emitting the final prompt.
-            # Preserve Thinking while that prompt is queued or running.
+            # Preserve Thinking while that prompt is queued or running. Also do
+            # not announce Idle merely because Moonshine won the startup race.
             if (
                 not self._agent_turn_pending
-                and self.goose.state
-                not in (GooseState.THINKING, GooseState.ERROR)
+                and self.gateway.state is GatewayState.READY
+                and self.goose.state is GooseState.IDLE
             ):
                 self.overlay.set_status("Idle")
         elif state is VoiceState.LISTENING:
+            self.readiness.set_component("mic", "ready")
             # PTT is a true barge-in boundary. Stop audio and cancel/freeze the
             # active model turn at key-down, before recording the replacement.
             self._interrupt_active_turn_for_replacement()
@@ -503,20 +521,25 @@ class DexterHost:
             self.overlay.set_stt_partial("")
             self.overlay.set_status("Listening…")
         elif state is VoiceState.FINALIZING:
+            self.readiness.set_component("mic", "ready")
             self.overlay.set_status("Finishing speech…")
         elif state is VoiceState.ERROR:
+            self.readiness.set_component("mic", "error")
             self.show_overlay()
-            self.overlay.set_status("Speech error")
+            self.overlay.set_status("Microphone error")
         elif state is VoiceState.STOPPED and not self._quitting:
-            self.overlay.set_status("Speech stopped")
+            self.readiness.set_component("mic", "stopped")
+            self.overlay.set_status("Microphone stopped")
 
     @Slot(object)
     def _on_goose_state(self, state: GooseState) -> None:
         if state is GooseState.STARTING:
+            self.readiness.set_component("agent", "starting")
             self._refresh_interaction_admission()
             if self.voice.state is not VoiceState.LISTENING:
-                self.overlay.set_status("Starting Dexter…")
+                self.overlay.set_status("Starting agent…")
         elif state is GooseState.IDLE:
+            self.readiness.set_component("agent", "ready")
             # A replacement is submitted only after ACP has fully returned to
             # IDLE. This avoids the cancel-vs-submit race and keeps one turn live.
             if self._submit_pending_replacement_if_ready():
@@ -533,6 +556,7 @@ class DexterHost:
             self._refresh_interaction_admission()
             self.overlay.set_status("Thinking…")
         elif state is GooseState.ERROR:
+            self.readiness.set_component("agent", "error")
             self._pending_replacement_prompt = None
             self._discard_interrupted_response = False
             self.speech.interrupt()
@@ -541,6 +565,7 @@ class DexterHost:
             self.show_overlay()
             self.overlay.set_status("Agent error")
         elif state is GooseState.STOPPED and not self._quitting:
+            self.readiness.set_component("agent", "stopped")
             self._pending_replacement_prompt = None
             self._discard_interrupted_response = False
             self.speech.interrupt()
@@ -632,13 +657,17 @@ class DexterHost:
     @Slot(object)
     def _on_gateway_state(self, state: GatewayState) -> None:
         if state is GatewayState.STARTING:
+            self.readiness.set_component("gateway", "starting")
             if self.voice.state is not VoiceState.LISTENING:
                 self.overlay.set_status("Starting gateway…")
         elif state is GatewayState.READY:
+            self.readiness.set_component("gateway", "ready")
             self._refresh_interaction_admission()
             if self.goose.state is GooseState.STOPPED:
+                self.readiness.set_component("agent", "starting")
                 self.overlay.set_status("Starting agent…")
         elif state is GatewayState.ERROR:
+            self.readiness.set_component("gateway", "error")
             self._pending_replacement_prompt = None
             self._discard_interrupted_response = False
             self.speech.interrupt()
@@ -647,6 +676,7 @@ class DexterHost:
             self.show_overlay()
             self.overlay.set_status("Gateway error")
         elif state is GatewayState.STOPPED and not self._quitting:
+            self.readiness.set_component("gateway", "stopped")
             self._pending_replacement_prompt = None
             self._discard_interrupted_response = False
             self.speech.interrupt()
@@ -656,6 +686,7 @@ class DexterHost:
 
     @Slot(str)
     def _on_gateway_error(self, message: str) -> None:
+        self.readiness.set_component("gateway", "error", reason=message)
         self.speech.interrupt()
         self._agent_turn_pending = False
         self._pending_replacement_prompt = None
@@ -680,6 +711,7 @@ class DexterHost:
         # The service suppresses stale warm-up callbacks after Voice is turned
         # off. This therefore represents the currently enabled production worker.
         if self._voice_enabled:
+            self.readiness.set_component("voice", "ready")
             self.voice_control.set_state("ready")
 
         if isinstance(info, dict):
@@ -696,11 +728,16 @@ class DexterHost:
         # Keep the user's preference enabled so a transient startup failure does
         # not silently rewrite settings. The secondary action becomes a retry.
         if self._voice_enabled:
+            self.readiness.set_component("voice", "error", reason=message)
             self.voice_control.set_state("error")
+            self.show_overlay()
+            if not self._agent_turn_pending:
+                self.overlay.set_status("Voice error")
         print(f"[TTS ERROR] {message}", file=sys.stderr)
 
     @Slot()
     def _on_tts_disabled(self) -> None:
+        self.readiness.set_component("voice", "off")
         self.voice_control.set_state("off")
         print("[TTS] Voice output off; model resources released")
 
@@ -737,17 +774,20 @@ class DexterHost:
     @Slot(str)
     def _on_voice_error(self, message: str) -> None:
         self.show_overlay()
-        self.overlay.set_status("Speech error")
+        self.overlay.set_status("Speech input error")
         print(f"[VOICE ERROR] {message}", file=sys.stderr)
 
     @Slot(str)
     def _on_voice_startup_failed(self, message: str) -> None:
+        self.readiness.set_component("mic", "error", reason=message)
         self.show_overlay()
-        self.overlay.set_status("Speech failed to start")
+        self.overlay.set_status("Microphone failed to start")
         print(f"[VOICE STARTUP ERROR] {message}", file=sys.stderr)
 
     @Slot(str)
     def _on_goose_error(self, message: str) -> None:
+        if self.goose.state in (GooseState.STARTING, GooseState.ERROR):
+            self.readiness.set_component("agent", "error", reason=message)
         self.speech.interrupt()
         self._agent_turn_pending = False
         self._pending_replacement_prompt = None
