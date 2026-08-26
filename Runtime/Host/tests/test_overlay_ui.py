@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
-from Runtime.Host.overlay import DexterOverlay
+from Runtime.Host.interactive_overlay import DexterOverlay
 from Runtime.Host.voice_output_control import VoiceOutputControl
 
 
@@ -19,6 +19,8 @@ class OverlayUITests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.overlay = DexterOverlay()
+        self.overlay.show()
+        self._app.processEvents()
 
     def tearDown(self) -> None:
         self.overlay.close()
@@ -40,6 +42,60 @@ class OverlayUITests(unittest.TestCase):
             layout.itemAt(1).widget(),
             self.overlay._permanent_cards[1],
         )
+
+    def test_short_history_hugs_content_below_height_cap(self) -> None:
+        self.overlay.resize(
+            self.overlay._DEFAULT_WIDTH,
+            self.overlay._DEFAULT_HEIGHT,
+        )
+        self.overlay.finalize_user_prompt("short message")
+        self.overlay._fit_height_to_content()
+
+        self.assertLess(
+            self.overlay.height(),
+            self.overlay._DEFAULT_HEIGHT,
+        )
+        self.assertGreaterEqual(
+            self.overlay.height(),
+            self.overlay.minimumHeight(),
+        )
+
+    def test_busy_composer_keeps_typing_and_interrupt_send_available(self) -> None:
+        self.overlay.set_prompt_input_enabled(True)
+        self.overlay.set_agent_busy(True)
+
+        self.assertTrue(self.overlay.prompt_input.isEnabled())
+        self.assertTrue(self.overlay.send_button.isVisible())
+        self.assertEqual(self.overlay.send_button.text(), "Send now")
+        self.assertTrue(self.overlay.cancel_button.isVisible())
+
+        self.overlay.set_agent_busy(False)
+        self.assertEqual(self.overlay.send_button.text(), "Send")
+
+    def test_interrupted_response_is_frozen_before_next_user_turn(self) -> None:
+        self.overlay.begin_assistant_response()
+        self.overlay.append_assistant_text("partial answer")
+        self.overlay.finish_interrupted_response()
+        self.overlay.finalize_user_prompt("replacement")
+
+        self.assertIsNone(self.overlay._assistant_card)
+        self.assertEqual(len(self.overlay._permanent_cards), 2)
+        self.assertEqual(
+            self.overlay._permanent_cards[0].role_label.text(),
+            "Dexter · interrupted",
+        )
+        self.assertEqual(
+            self.overlay._permanent_cards[1].role_label.text(),
+            "You",
+        )
+
+    def test_empty_interrupted_response_is_not_preserved(self) -> None:
+        self.overlay.begin_assistant_response()
+        self.overlay.finish_interrupted_response()
+
+        self.assertIsNone(self.overlay._assistant_card)
+        self.assertEqual(self.overlay.history_layout.count(), 0)
+        self.assertEqual(self.overlay._permanent_cards, [])
 
     def test_assistant_markdown_preserves_raw_text_for_copy(self) -> None:
         self.overlay.begin_assistant_response()
