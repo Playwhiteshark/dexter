@@ -10,7 +10,14 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QSizePolicy,
+    QVBoxLayout,
+    QWidget,
+)
 
 LayoutChangedCallback = Callable[[], None]
 
@@ -115,6 +122,15 @@ class RuntimeReadinessView(QFrame):
     ) -> None:
         super().__init__(overlay)
         self.setObjectName("readinessPanel")
+        # Preferred/Preferred widgets are allowed to shrink below sizeHint().
+        # During compact startup that let Qt crush the four status rows into a
+        # thin strip while giving the stretchable transcript the remaining
+        # height. The readiness rows are small fixed chrome: keep their natural
+        # vertical size and let the transcript absorb any pressure instead.
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Minimum,
+        )
         self._on_layout_changed = on_layout_changed
         self._startup_active = False
         self._states = {
