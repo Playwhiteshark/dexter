@@ -116,6 +116,7 @@ class RuntimeReadinessView(QFrame):
         super().__init__(overlay)
         self.setObjectName("readinessPanel")
         self._on_layout_changed = on_layout_changed
+        self._startup_active = False
         self._states = {
             component: "waiting" for component in _COMPONENT_LABELS
         }
@@ -194,6 +195,7 @@ class RuntimeReadinessView(QFrame):
         self._refresh_visibility()
 
     def begin_startup(self, *, voice_enabled: bool) -> None:
+        self._startup_active = True
         self.set_component("gateway", "starting")
         self.set_component("agent", "waiting")
         self.set_component("mic", "starting")
@@ -239,7 +241,14 @@ class RuntimeReadinessView(QFrame):
         states = set(self._states.values())
         has_failure = bool(states & _FAILURE_STATES)
         has_transition = bool(states & _ACTIVE_STATES)
-        visible = has_failure or has_transition
+
+        # This is a startup/readiness surface, not a general lifecycle panel.
+        # Once the initial launch has fully settled, ordinary mid-session
+        # transitions (most notably Voice loading/unloading) stay in the compact
+        # header controls instead of resurrecting the full component list.
+        if self._startup_active and not has_failure and not has_transition:
+            self._startup_active = False
+        visible = self._startup_active and (has_failure or has_transition)
 
         self.title_label.setText(
             "Dexter needs attention" if has_failure else "Starting Dexter"
