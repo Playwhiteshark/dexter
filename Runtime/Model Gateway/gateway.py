@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import urllib.error
 import urllib.request
@@ -11,8 +12,14 @@ LISTEN_HOST = "127.0.0.1"
 LISTEN_PORT = 11435
 UPSTREAM = "http://127.0.0.1:11434"
 
-DEFAULT_REASONING_EFFORT = "none"
-PRODUCTION_MODEL = "gemma4-jarvis:12b"
+DEFAULT_REASONING_EFFORT = os.environ.get(
+    "DEXTER_REASONING_EFFORT",
+    "none",
+).strip() or "none"
+PRODUCTION_MODEL = os.environ.get(
+    "DEXTER_MODEL",
+    "gemma4-jarvis:12b",
+).strip() or "gemma4-jarvis:12b"
 PRELOAD_KEEP_ALIVE = "5m"
 PRELOAD_TIMEOUT_SECONDS = 120
 
