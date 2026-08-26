@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "id": "dexter",
+  "display_name": "Dexter",
+  "instructions_file": null,
+  "model": {
+    "provider": "ollama",
+    "name": "gemma4-jarvis:12b",
+    "reasoning_effort": "none"
+  },
+  "voice": {
+    "backend": "neutts2e",
+    "preset": "production_arc",
+    "speaker": "paul",
+    "emotion": "neutral"
+  },
+  "tools": {
+    "preset": "dexter_default"
+  },
+  "appearance": {
+    "accent": null
+  }
+}
