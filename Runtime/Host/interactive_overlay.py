@@ -12,6 +12,7 @@ higher-level interaction behavior that depends on runtime state:
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QTimer
+from PySide6.QtWidgets import QSizePolicy
 
 from Runtime.Host.overlay import ApprovalOption
 from Runtime.Host.overlay import DexterOverlay as _BaseDexterOverlay
@@ -25,13 +26,23 @@ class DexterOverlay(_BaseDexterOverlay):
         self._fit_scheduled = False
         self._auto_height_cap = self._DEFAULT_HEIGHT
         super().__init__()
+
+        # QScrollArea has a useful size hint for ordinary windows, but here the
+        # transcript must be able to collapse all the way to its actual content.
+        # Once the overlay reaches its cap the same widget expands and scrolls.
+        self.scroll.setMinimumHeight(0)
+        self.scroll.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Ignored,
+        )
+
         self.history_widget.installEventFilter(self)
         self._schedule_content_fit()
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt API
         if (
             watched is self.history_widget
-            and event.type() is QEvent.Type.LayoutRequest
+            and event.type() == QEvent.Type.LayoutRequest
         ):
             self._schedule_content_fit()
         return super().eventFilter(watched, event)
