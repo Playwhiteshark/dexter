@@ -66,6 +66,29 @@ class RuntimeReadinessViewTests(unittest.TestCase):
         self.assertEqual(self.view.state("voice"), "off")
         self.assertFalse(self.view.isVisible())
 
+    def test_mid_session_voice_toggle_does_not_reopen_startup_panel(self) -> None:
+        self.view.begin_startup(voice_enabled=True)
+        self._settle_core()
+        self.view.set_component("voice", "ready")
+        self.assertFalse(self.view.isVisible())
+
+        self.view.set_component("voice", "stopping")
+        self.assertFalse(self.view.isVisible())
+        self.view.set_component("voice", "off")
+        self.assertFalse(self.view.isVisible())
+        self.view.set_component("voice", "starting")
+        self.assertFalse(self.view.isVisible())
+        self.view.set_component("voice", "ready")
+        self.assertFalse(self.view.isVisible())
+
+    def test_startup_panel_expands_compact_overlay_instead_of_being_squashed(self) -> None:
+        self.view.begin_startup(voice_enabled=True)
+        self.overlay._fit_height_to_content()
+        self._app.processEvents()
+
+        self.assertGreater(self.overlay.height(), self.overlay.minimumHeight())
+        self.assertGreaterEqual(self.view.height(), self.view.sizeHint().height())
+
     def test_settled_panel_stays_hidden_when_parent_was_hidden_during_startup(self) -> None:
         self.overlay.hide()
         self.view.begin_startup(voice_enabled=False)
@@ -82,6 +105,7 @@ class RuntimeReadinessViewTests(unittest.TestCase):
             "Dexter could not start its Model Gateway. Port 11435 appears to "
             "already be in use.\n\nGateway output:\nTraceback noise"
         )
+        self.view.begin_startup(voice_enabled=True)
         self.view.set_component("gateway", "error", reason=full_reason)
 
         self.assertTrue(self.view.isVisible())
