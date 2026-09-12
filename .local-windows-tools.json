@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "name": "Dexter",
+  "storage": {
+    "logs": {
+      "status": "declared",
+      "paths": [
+        {
+          "path": "Runtime/Model Gateway/ollama_advisor_trace.jsonl",
+          "cleanup": "safe"
+        },
+        {
+          "path": "Runtime/Model Gateway/ollama_advisor_debug.jsonl",
+          "cleanup": "safe"
+        },
+        {
+          "path": "Runtime/Model Gateway/ollama_proxy_trace.jsonl",
+          "cleanup": "safe"
+        },
+        {
+          "path": "Runtime/Voice/debug",
+          "cleanup": "safe"
+        },
+        {
+          "path": "Runtime/Voice/ptt_debug",
+          "cleanup": "safe"
+        }
+      ]
+    },
+    "cache": {
+      "status": "declared",
+      "paths": [
+        {
+          "path": ".venv",
+          "cleanup": "safe"
+        },
+        {
+          "path": "%LOCALAPPDATA%\\Dexter\\Voice\\neutts2e\\cache",
+          "cleanup": "never-automatic"
+        }
+      ]
+    },
+    "state": {
+      "status": "none",
+      "paths": []
+    },
+    "configuration": {
+      "status": "declared",
+      "paths": [
+        {
+          "path": "Runtime/Tools/dexter-tools/local_config.py",
+          "cleanup": "never-automatic"
+        }
+      ]
+    },
+    "artifacts": {
+      "status": "unknown",
+      "paths": []
+    },
+    "userData": {
+      "status": "unknown",
+      "paths": []
+    }
+  }
+}
