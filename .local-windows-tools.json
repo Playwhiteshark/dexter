@@ -58,13 +58,8 @@
       "paths": []
     },
     "userData": {
-      "status": "declared",
-      "paths": [
-        {
-          "path": "%LOCALAPPDATA%\\Dexter\\state\\computer_memory.json",
-          "cleanup": "never-automatic"
-        }
-      ]
+      "status": "unknown",
+      "paths": []
     }
   }
 }
