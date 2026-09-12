@@ -64,6 +64,8 @@ Dexter Tools' operational/computer memory defaults to:
 
 This is persistent user-specific application data. It survives source updates and must never be treated as a disposable log/cache. `Runtime/Tools/dexter-tools/local_config.py` may override its state root; that machine policy file is itself local configuration and is gitignored.
 
+Because the state root is deliberately machine-configurable, the portable `.local-windows-tools.json` declaration leaves **`userData: unknown`** rather than falsely claiming the default path is exhaustive on every machine. The default is documented here; any future Projects Index personal overlay may supply a machine/user-specific portable policy without weakening cleanup safety.
+
 ### Configuration
 
 Machine-specific Dexter Tools policy belongs in:
