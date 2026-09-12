@@ -18,6 +18,16 @@ startup error.
 
 Normal Host shutdown first stops audible/queued TTS and its worker, then stops Moonshine, Goose ACP, and the Gateway process that the Host created.
 
+## Hidden-launch diagnostics
+
+The normal console-free launcher `Runtime/Host/launch_hidden.vbs` redirects Host stderr to:
+
+```text
+%LOCALAPPDATA%\Dexter\Diagnostics\host-stderr.log
+```
+
+This is a diagnostic log, not configuration or user data. It may be deleted safely and will be recreated when a later hidden run writes stderr. The location is mirrored in the repository's `.local-windows-tools.json` storage declaration so Projects Index can offer explicit log cleanup without touching persistent Dexter state.
+
 ## Python/runtime environment
 
 Dexter's Host, STT, and TTS dependencies share one uv-managed environment at the repository root. The project is pinned to Python 3.13 by `.python-version` and `pyproject.toml` because NeuTTS 1.4.1 requires Python `<3.14` while the current Host/STT stack supports 3.13.

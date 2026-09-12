@@ -23,6 +23,14 @@ Dexter intentionally distinguishes reproducible runtime material from persistent
 
 ### Logs / diagnostics
 
+Normal hidden Host startup redirects persistent stderr to:
+
+```text
+%LOCALAPPDATA%\Dexter\Diagnostics\host-stderr.log
+```
+
+That file exists so console-free startup/runtime failures still have a durable diagnostic sink. It is disposable diagnostic output and is safe for Projects Index log cleanup; deleting it must not affect Dexter configuration or user memory.
+
 The experimental advisor/model-gateway path can write JSONL diagnostics in:
 
 ```text
