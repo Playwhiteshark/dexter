@@ -6,6 +6,10 @@
       "status": "declared",
       "paths": [
         {
+          "path": "%LOCALAPPDATA%\\Dexter\\Diagnostics\\host-stderr.log",
+          "cleanup": "safe"
+        },
+        {
           "path": "Runtime/Model Gateway/ollama_advisor_trace.jsonl",
           "cleanup": "safe"
         },
