@@ -2,6 +2,8 @@
 
 Dexter is a standalone project with its own architecture and lifecycle. This repository is the source of truth for Dexter; do not move its implementation into Local Windows Tools or Personal Operations merely because Projects Index can catalogue it.
 
+**Calendar / Todoist request routing:** If Dexter is asked to schedule, track, update or verify a user event/task, follow the [universal personal-ops runbook](https://github.com/Playwhiteshark/personal-ops/blob/main/runbooks/calendar-todoist-capture/README.md) for intent, target, deduplication and read-back rules. This instruction does not mean Dexter currently has an Outlook, Google Calendar or Todoist write tool: confirm implemented capabilities and explicit authorisation first.
+
 Before changing Dexter, read:
 
 1. `README.md` for project ownership and storage/cleanup rules;
