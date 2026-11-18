@@ -2,10 +2,14 @@
 # Generated for the Local AI / Jarvis project.
 # This script DOES NOT modify config, tasks, processes, registry, models, or files.
 # It writes a Markdown report beside this script.
+# Pass -Base (or set DEXTER_AI_ROOT) to point at the folder that contains Jarvis and Jarvis Sandbox.
+
+param(
+    [string]$Base = $(if ($env:DEXTER_AI_ROOT) { $env:DEXTER_AI_ROOT } else { Join-Path $env:USERPROFILE "COMPUTER STUFF\Self-hosted AI" })
+)
 
 $ErrorActionPreference = "Continue"
 
-$Base = "C:\Users\ahmad\COMPUTER STUFF\Self-hosted AI"
 $Jarvis = Join-Path $Base "Jarvis"
 $Sandbox = Join-Path $Base "Jarvis Sandbox"
 $GooseCfg = Join-Path $env:APPDATA "Block\goose\config\config.yaml"

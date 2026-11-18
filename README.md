@@ -13,9 +13,9 @@ Normal desktop use is console-free: `Runtime/Host/configure_shortcut.ps1` create
 
 ## Repository ownership
 
-This repository owns Dexter source, project documentation, issues, and product-specific lifecycle. Local Windows Tools may index a checkout, inspect Git state, measure its size, and consume the optional `.local-windows-tools.json` storage declaration, but it does not own Dexter source or user data.
+This repository owns Dexter source, project documentation, issues, and product-specific lifecycle. External project-indexing tools may read the optional `.local-windows-tools.json` storage declaration, but they do not own Dexter source or user data.
 
-Machine-specific absolute checkout paths belong in Local Windows Tools' machine-local Projects Index registry, not in this repository.
+Machine-specific absolute checkout paths are never committed to this repository.
 
 ## Storage and cleanup ownership
 

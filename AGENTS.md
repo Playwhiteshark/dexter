@@ -1,8 +1,8 @@
 # Agent instructions — Dexter
 
-Dexter is a standalone project with its own architecture and lifecycle. This repository is the source of truth for Dexter; do not move its implementation into Local Windows Tools or Personal Operations merely because Projects Index can catalogue it.
+Dexter is a standalone project with its own architecture and lifecycle. This repository is the source of truth for Dexter; keep its implementation here rather than in external tooling that indexes it.
 
-**Calendar / Todoist request routing:** If Dexter is asked to schedule, track, update or verify a user event/task, follow the [universal personal-ops runbook](https://github.com/Playwhiteshark/personal-ops/blob/main/runbooks/calendar-todoist-capture/README.md) for intent, target, deduplication and read-back rules. This instruction does not mean Dexter currently has an Outlook, Google Calendar or Todoist write tool: confirm implemented capabilities and explicit authorisation first.
+**Calendar / task integrations:** Dexter does not currently have Outlook, Google Calendar or task-manager write tools. Before adding one, confirm the implemented capability and explicit user authorisation, and design intent, target, deduplication and read-back verification into the tool itself.
 
 Before changing Dexter, read:
 
