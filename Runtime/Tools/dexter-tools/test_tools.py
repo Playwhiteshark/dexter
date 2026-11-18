@@ -1205,8 +1205,8 @@ def memory_suite() -> list[bool]:
             "session_id": "real-live-session",
             "workspace_name": "Jarvis",
             "workspace_file": None,
-            "workspace_folders": [r"C:\Users\ahmad\Jarvis"],
-            "active_file": r"C:\Users\ahmad\Jarvis\runtime.md",
+            "workspace_folders": [r"C:\Users\example\Jarvis"],
+            "active_file": r"C:\Users\example\Jarvis\runtime.md",
             "focused": True,
             "updated_unix": time.time(),
         }

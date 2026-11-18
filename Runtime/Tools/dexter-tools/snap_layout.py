@@ -593,7 +593,7 @@ def _send_native_snap(hwnd: int, zone: str) -> None:
     """Place one HWND into a native Windows Snap slot with paced key input.
 
     Corner placement is a stateful Win+Arrow sequence. Sending every key event
-    in one zero-delay SendInput batch was flaky on Ahmed's real three-window
+    in one zero-delay SendInput batch was flaky on a real three-window
     layout, especially for top-right. Keep Win held, but pause between the side
     and vertical arrows so Shell can commit the intermediate snap state.
     """
